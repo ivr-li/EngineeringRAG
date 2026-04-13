@@ -1,4 +1,4 @@
-
+```
 EngineeringRAG/
 ├── preprocess/               # сервис обработки файлов (PDF -> MinIO -> векторная БД)
 │   ├── app/                  # код FastAPI
@@ -24,3 +24,4 @@ EngineeringRAG/
 │
 └── k8s/                      # общий манифест
     └── namespaces.yaml
+```
