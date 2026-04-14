@@ -9,9 +9,9 @@ EngineeringRAG/
 │   └── k8s/
 │       └── minio.yaml
 │
-├── vector‑db/                # векторная БД (Qdrant или Milvus)
+├── qdrant-db/                # векторная БД (Qdrant или Milvus)
 │   └── k8s/
-│       └── vector‑db.yaml
+│       └── qdrant-db.yaml
 │
 ├── llm‑service/              # Основной RAG-сервис
 │   ├── app/                  # FastAPI‑сервис, который:
