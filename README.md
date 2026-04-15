@@ -1,3 +1,9 @@
+# EngineeringRAG
+
+Система обработки инженерных документов.
+
+## Архитектура
+
 ```
 EngineeringRAG/
 ├── preprocess/               # сервис обработки файлов (PDF -> MinIO -> векторная БД)
@@ -22,6 +28,22 @@ EngineeringRAG/
 │   └── k8s/
 │       └── deployment.yaml
 │
-└── k8s/                      # общий манифест
-    └── namespaces.yaml
+└── k8s/                      # общие манифесты
+    ├── namespace.yaml
+    ├── minio.yaml
+    ├── qdrant.yaml
+    └── mineru.yaml
+```
+
+## MinerU - PDF Extraction
+```bash
+docker compose -f compose.yaml build
+
+# Запуск одного сервиса
+docker compose -f compose.yaml --profile api up -d
+docker compose -f compose.yaml --profile openai-server up -d
+docker compose -f compose.yaml --profile gradio up -d
+
+# Запуск всех сервисов
+docker compose -f compose.yaml --profile all up -d
 ```
