@@ -2,6 +2,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import *
 
 import httpx
 import requests
@@ -9,6 +10,9 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
+from mineru.cli import api_client as _api_client
+from mineru.cli.common import image_suffixes, office_suffixes, pdf_suffixes
+from mineru.utils.guess_suffix_or_lang import guess_suffix_by_path
 from pydantic import ValidationError
 
 load_dotenv()
@@ -17,24 +21,35 @@ load_dotenv()
 class Settings:
     UNST_API_KEY: str | None = os.getenv("UNSTRUCTURED_API_KEY")
     UNST_API_URL: str | None = os.getenv("UNSTRUCTURED_API_URL")
-    VECTORSTORE_DIR = Path("src/data/vectorstore")
-    MINERU_HOST: str = "http://0.0.0.0:8000"
+    VECTORSTORE_DIR = Path("src/data/minio")
+    MINERU_HOST: str = "http://127.0.0.0:8000"
+    SUPPORTED_INPUT_SUFFIXES = set(pdf_suffixes + image_suffixes + office_suffixes)
 
 
 class MineruClient:
     def __init__(self) -> None:
         self.url = Settings.MINERU_HOST
 
-    def partition(self, patch: str):
-        data_path = Path(patch)
+    def _iter_input_files(self, input_path: str | Path) -> List[Path]:
+        p = Path(input_path)
 
-        if data_path.is_dir():
-            files = [str(f) for f in data_path.glob("*.pdf")]
-        else:
-            files = [patch]
+        if p.is_file():
+            return [p]
+
+        if p.is_dir():
+            return [
+                f
+                for f in p.iterdir()
+                if f.suffix.lower() in Settings.SUPPORTED_INPUT_SUFFIXES
+            ]
+
+    def partition(self, path: str):
+        files_paths = self._iter_input_files(path)
+        if not files_paths:
+            raise ValueError(f"No input files found under {path}")
 
         req_data = {
-            "files": files,
+            "files": files_paths,
             "lang_list": "east_slavic",
             "backend": "pipeline",
             "parse_method": "auto",

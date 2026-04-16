@@ -1,135 +1,71 @@
-services:
-  mineru-openai-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mineru:latest
-    container_name: mineru-openai-server
-    restart: always
-    profiles: ["openai-server"]
-    ports:
-      - 30000:30000
-    environment:
-      MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-openai-server
-    command:
-      --host 0.0.0.0
-      --port 30000
-      # --gpu-memory-utilization 0.5  # If encountering VRAM shortage, reduce the KV cache size by this parameter; if VRAM issues persist, try lowering it further to `0.4` or below.
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    ipc: host
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:30000/health || exit 1"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"] # Modify for multiple GPUs: ["0", "1"]
-              capabilities: [gpu]
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5}
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+    AIRFLOW__CORE__ENABLE_XCOM_PICKLING: "true"
 
+    # MinIO
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+    MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    MINIO_BUCKET: ${MINIO_BUCKET:-airflow}
+
+    # Qdrant
+    QDRANT_URL: http://qdrant:6333
+
+    # _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-apache-airflow-providers-qdrant}
+
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    airflow-postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+    # qdrant:
+    #   condition: service_healthy
+
+services:
   mineru-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mineru:latest
+    image: dvmed/mineru:v3.0.9
     container_name: mineru-api
     restart: always
-    profiles: ["api"]
     ports:
       - 8000:8000
     environment:
       MINERU_MODEL_SOURCE: local
     entrypoint: mineru-api
-    command:
-      --host 0.0.0.0
+    command: --host 0.0.0.0
       --port 8000
-      # parameters for vllm-engine
-      # --gpu-memory-utilization 0.5  # If encountering VRAM shortage, reduce the KV cache size by this parameter; if VRAM issues persist, try lowering it further to `0.4` or below.
     ulimits:
       memlock: -1
       stack: 67108864
     ipc: host
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/docs"]
+    depends_on:
+      <<: *airflow-common-depends-on
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0"] # Modify for multiple GPUs: ["0", "1"]
+              device_ids: ["0"]
               capabilities: [gpu]
 
-  mineru-router:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mineru:latest
-    container_name: mineru-router
-    restart: always
-    profiles: ["router"]
-    ports:
-      - 8002:8002
-    environment:
-      MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-router
-    command:
-      --host 0.0.0.0
-      --port 8002
-      --local-gpus auto
-      # To aggregate existing mineru-api services instead of starting local workers:
-      # --local-gpus none
-      # --upstream-url http://mineru-api:8000
-      # --upstream-url http://mineru-api-2:8000
-      # parameters for vllm-engine
-      # --gpu-memory-utilization 0.5  # If encountering VRAM shortage, reduce the KV cache size by this parameter; if VRAM issues persist, try lowering it further to `0.4` or below.
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    ipc: host
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"] # Modify for multiple GPUs: ["0", "1"]
-              capabilities: [gpu]
-
-  mineru-gradio:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mineru:latest
-    container_name: mineru-gradio
-    restart: always
-    profiles: ["gradio"]
-    ports:
-      - 7860:7860
-    environment:
-      MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-gradio
-    command:
-      --server-name 0.0.0.0
-      --server-port 7860
-      # --enable-api false  # If you want to disable the API, set this to false
-      # --max-convert-pages 20  # If you want to limit the number of pages for conversion, set this to a specific number
-      # parameters for vllm-engine
-      # --gpu-memory-utilization 0.5  # If encountering VRAM shortage, reduce the KV cache size by this parameter; if VRAM issues persist, try lowering it further to `0.4` or below.
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    ipc: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"] # Modify for multiple GPUs: ["0", "1"]
-              capabilities: [gpu]
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -139,4 +75,243 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./data/qdrant:/qdrant/storage
+      - qdrant-storage:/qdrant/storage
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:6333/dashboard"]
+    #   interval: 10s
+    #   timeout: 10s
+    #   retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  airflow-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 50
+    restart: unless-stopped
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"',
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    hostname: airflow-worker
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor_utils.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"',
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    user: "0:0"
+    volumes:
+      - ./airflow:/sources
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command:
+      - bash
+      - -c
+      - airflow
+
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  warehouse-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${WAREHOUSE_PG_PASSWORD:-postgres}
+      POSTGRES_DB: ${WAREHOUSE_PG_DB:-warehouse}
+    ports:
+      - "5052:5432"
+    volumes:
+      - postgres-warehouse-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  client-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${CLIENT_PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${CLIENT_PG_PASSWORD:-postgres}
+      POSTGRES_DB: ${CLIENT_PG_DB:-postgres}
+    ports:
+      - "5051:5432"
+    volumes:
+      - ./client-postgres-init:/docker-entrypoint-initdb.d
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    restart: unless-stopped
+
+  superset:
+    image: apache/superset:4.1.1
+    ports:
+      - "5054:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-revti-etl-superset-secret-change-me}
+      SUPERSET_LOAD_EXAMPLES: "no"
+    depends_on:
+      superset-db:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - superset-home:/app/superset_home
+
+  superset-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+      POSTGRES_DB: superset
+    volumes:
+      - superset-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "superset"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  airflow-db-volume:
+  superset-home:
+  superset-db-volume:
+  postgres-warehouse-volume:
+  qdrant-storage:

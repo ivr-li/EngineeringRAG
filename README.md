@@ -41,7 +41,6 @@ docker compose -f compose.yaml build
 
 # Запуск одного сервиса
 docker compose -f compose.yaml --profile api up -d
-docker compose -f compose.yaml --profile openai-server up -d
 docker compose -f compose.yaml --profile gradio up -d
 
 # Запуск всех сервисов

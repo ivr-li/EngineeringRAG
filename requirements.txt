@@ -3,16 +3,17 @@ fastapi
 uvicorn[standard]
 pydantic
 python-dotenv
+requests
 
 # LangChain
 langchain
 langchain-openai
 langchain-community
-langchain-chroma
+# langchain-chroma
 langchain-qdrant
 
 # Vector DB
-chromadb
+#chromadb
 qdrant-client
 
 # Retrieval
@@ -24,8 +25,3 @@ pypdf
 pyyaml
 click
 httpx
-
-#Mineru
-uv
-mineru[all]
-qdrant-client
