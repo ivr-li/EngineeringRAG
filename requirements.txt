@@ -1,5 +1,4 @@
 # Core
-fastapi
 uvicorn[standard]
 pydantic
 python-dotenv
@@ -9,19 +8,16 @@ requests
 langchain
 langchain-openai
 langchain-community
-# langchain-chroma
 langchain-qdrant
 
 # Vector DB
-#chromadb
 qdrant-client
-
-# Retrieval
-rank_bm25
-sentence-transformers
-pypdf
 
 # Utilities
 pyyaml
 click
 httpx
+
+#Airflow
+pendulum
+mineru[core]

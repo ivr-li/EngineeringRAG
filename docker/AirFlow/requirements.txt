@@ -1,0 +1,22 @@
+# Core
+uvicorn[standard]
+pydantic
+python-dotenv
+requests
+
+# LangChain
+langchain
+langchain-openai
+langchain-community
+langchain-qdrant
+
+# Vector DB
+qdrant-client
+
+# Utilities
+pyyaml
+click
+httpx
+
+#Airflow
+pendulum

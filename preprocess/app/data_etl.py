@@ -23,6 +23,8 @@ class Settings:
     UNST_API_URL: str | None = os.getenv("UNSTRUCTURED_API_URL")
     VECTORSTORE_DIR = Path("src/data/minio")
     MINERU_HOST: str = "http://127.0.0.0:8000"
+    MINIO_HOST: str = "http://127.0.0.0:9000"
+    QDRANT_HOST: str = "http://127.0.0.0:6333"
     SUPPORTED_INPUT_SUFFIXES = set(pdf_suffixes + image_suffixes + office_suffixes)
 
 
