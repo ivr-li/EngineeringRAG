@@ -7,12 +7,9 @@ from typing import *
 import httpx
 import requests
 from dotenv import load_dotenv
-from langchain_chroma import Chroma
+# from langchain_qdrant
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
-from mineru.cli import api_client as _api_client
-from mineru.cli.common import image_suffixes, office_suffixes, pdf_suffixes
-from mineru.utils.guess_suffix_or_lang import guess_suffix_by_path
 from pydantic import ValidationError
 
 load_dotenv()
@@ -25,7 +22,7 @@ class Settings:
     MINERU_HOST: str = "http://127.0.0.0:8000"
     MINIO_HOST: str = "http://127.0.0.0:9000"
     QDRANT_HOST: str = "http://127.0.0.0:6333"
-    SUPPORTED_INPUT_SUFFIXES = set(pdf_suffixes + image_suffixes + office_suffixes)
+    SUPPORTED_INPUT_SUFFIXES = set(".pdf")
 
 
 class MineruClient:
@@ -118,22 +115,22 @@ class UnstructuredClient:
         return resp.json()
 
 
-class VectorStoreService:
-    def __init__(self):
-        self.embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+# class VectorStoreService:
+#     def __init__(self):
+#         self.embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-    def save(self, documents: list, persist_dir: str):
-        Chroma.from_documents(
-            documents=documents,
-            embedding=self.embeddings,
-            persist_directory=persist_dir,
-        )
+#     def save(self, documents: list, persist_dir: str):
+#         Chroma.from_documents(
+#             documents=documents,
+#             embedding=self.embeddings,
+#             persist_directory=persist_dir,
+#         )
 
-    def load(self, persist_dir: str) -> Chroma:
-        return Chroma(
-            persist_directory=persist_dir,
-            embedding_function=self.embeddings,
-        )
+#     def load(self, persist_dir: str) -> Chroma:
+#         return Chroma(
+#             persist_directory=persist_dir,
+#             embedding_function=self.embeddings,
+#         )
 
 
 class JSONStorage:
