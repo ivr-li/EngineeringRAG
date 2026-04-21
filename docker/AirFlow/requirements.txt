@@ -1,3 +1,8 @@
+pendulum
+apache-airflow
+apache-airflow-providers-amazon
+apache-airflow-providers-qdrant
+
 # Core
 uvicorn[standard]
 pydantic
@@ -17,6 +22,3 @@ qdrant-client
 pyyaml
 click
 httpx
-
-#Airflow
-pendulum

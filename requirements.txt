@@ -1,4 +1,8 @@
-# Core
+apache-airflow-task-sdk
+apache-airflow-providers-amazon
+apache-airflow-providers-qdrant
+
+#Core
 uvicorn[standard]
 pydantic
 python-dotenv
@@ -18,6 +22,3 @@ pyyaml
 click
 httpx
 
-#Airflow
-pendulum
-mineru[core]
