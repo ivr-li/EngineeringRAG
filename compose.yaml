@@ -18,7 +18,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
 
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-
+    PYTHONPATH: /opt/airflow/dags:/opt/airflow/plugins:/opt/airflow
 
     # Connections
     # AIRFLOW_CONN_MINIO: "aws://minioadmin:minioadmin@minio:9000?endpoint_url=http%3A%2F%2Fminio%3A9000"

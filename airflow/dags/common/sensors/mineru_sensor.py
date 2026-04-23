@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from airflow.configuration import conf
 from airflow.providers.http.hooks.http import HttpHook
-from airflow.sdk import BaseSensorOperator, Context
+from airflow.sdk import BaseOperator, BaseSensorOperator, Context  # noqa: F401
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 from asgiref.sync import sync_to_async
 
@@ -42,18 +41,18 @@ class MineruTrigger(BaseTrigger):
         """
 
         return (
-            "triggers.mineru_trigger.MineruStatusTrigger",
+            "common.sensors.mineru_sensor.MineruTrigger",
             {
                 "task_id": self.task_id,
-                "mineru_conn_id": self.mineru_conn_id,
-                "poke_interval": self.poke_interval,
+                "conn_id": self.conn_id,
+                "poll_interval": self.poll_interval,
             },
         )
 
     @sync_to_async
     def _check_status(self) -> dict:
         """Dont block event-loop"""
-        hook = HttpHook(method="GET", http_conn_id=self.mineru_conn_id)
+        hook = HttpHook(method="GET", http_conn_id=self.conn_id)
         resp = hook.run(f"/tasks/{self.task_id}")
         return resp.json()
 
@@ -61,7 +60,7 @@ class MineruTrigger(BaseTrigger):
     async def run(self) -> AsyncIterator[TriggerEvent]:
         while True:
             try:
-                js = self._check_status()
+                js = await self._check_status()
                 status = js.get("status")
 
                 if status == "completed":
@@ -72,7 +71,13 @@ class MineruTrigger(BaseTrigger):
                     )
 
                     # Fire the trigger event! This gets a worker to execute the operator's `execute_complete` method
-                    yield TriggerEvent(self.serialize())
+                    yield TriggerEvent(
+                        {
+                            "status": "completed",
+                            "task_id": self.task_id,
+                            "file_names": file_names,
+                        }
+                    )
                     return  # The return statement prevents the trigger from running again
                 elif status == "failed":
                     yield TriggerEvent(
@@ -98,7 +103,7 @@ class MineruStatusSensor(BaseSensorOperator):
     Deferrable operator that waits for a binary random choice between 0 and 1 to be 1.
     Args:
         wait_for_completion (bool): Whether to wait for the trigger to complete.
-        poke_interval (int): How many seconds to wait between polls,
+        poll_interval (int): How many seconds to wait between polls,
             both in deferrable or sensor mode.
         deferrable (bool): Whether to defer the operator. If set to False,
             the operator will act as a sensor.
@@ -108,23 +113,21 @@ class MineruStatusSensor(BaseSensorOperator):
 
     ui_color = "#73deff"
 
-    template_fields = ("external_task_id", "poke_interval")
+    template_fields = ("external_task_id", "poll_interval")
 
     def __init__(
         self,
         *,
         external_task_id: str,  # task_id from MinerU-endpoint /tasks/{id}
         mineru_conn_id: str = "mineru",
-        poke_interval: int = 15,
-        deferrable: bool = conf.getboolean(
-            "operators", "default_deferrable", fallback=False
-        ),
+        poll_interval: int = 15,
+        deferrable: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.external_task_id = external_task_id
         self.mineru_conn_id = mineru_conn_id
-        self.poke_interval = poke_interval
+        self.poll_interval = poll_interval
         self.deferrable = deferrable
 
     def execute(self, context: Context):
@@ -132,13 +135,13 @@ class MineruStatusSensor(BaseSensorOperator):
         # Add code you want to be executed before the deferred part here (this code only runs once)
 
         # Starting the deferral process
-        if self._defer:
+        if self.deferrable:
             self.log.info(f"Deferring to trigger for task {self.external_task_id}")
             self.defer(
                 trigger=MineruTrigger(
-                    task_id=self.mineru_task_id,
+                    task_id=self.external_task_id,
                     conn_id=self.mineru_conn_id,
-                    poke_interval=self.poke_interval,
+                    poll_interval=self.poll_interval,
                 ),
                 method_name="execute_complete",
             )
@@ -151,7 +154,7 @@ class MineruStatusSensor(BaseSensorOperator):
                 resp = hook.run(f"/tasks/{self.external_task_id}")
                 status = resp.json().get("status")
 
-                if status == "done":
+                if status == "completed":
                     return self.external_task_id
                 elif status == "failed":
                     raise RuntimeError(f"Mineru task {self.external_task_id} failed")
