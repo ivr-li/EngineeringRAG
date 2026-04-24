@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
-import os  # noqa: F401
 from collections import defaultdict
+from pathlib import Path
 
 import requests
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
@@ -13,7 +14,41 @@ from pendulum import datetime
 
 MINERU_URL = "http://mineru-api:8000"
 RAG_DATA_BUCKET = "ragfiles"
+DEV_DATA = "dev_data"
+DEV_DATA_MINERU = f"{DEV_DATA}/mineru_md"
+DEV_DATA_UNSTRUCTURED = f"{DEV_DATA}/unstruct_jsons"
 SUP_FORMATS = ["pdf/"]
+
+
+def del_file(file: str | Path) -> None:
+    path = Path(file)  # if isinstance(file_name, str) else file_name
+    if path.exists():
+        path.unlink()
+        logging.info(f">>> Removed existing: {path}")
+
+
+def load_to_s3(
+    hook: S3Hook,
+    filepath: str | list[str],
+    bucket_name: str = RAG_DATA_BUCKET,
+    prefix: str = DEV_DATA_MINERU,
+) -> str | None:
+    filepath = filepath if isinstance(filepath, list) else [filepath]
+    out = ""
+    try:
+        for patch in filepath:
+            hook.load_file(
+                filename=patch,
+                bucket_name=bucket_name,
+                key=f"{prefix}/{patch.split('/')[-1]}",
+                replace=True,
+            )
+            out += f"\n{patch}"
+        logging.info(f">> File loaded to minio: {out}")
+
+        return out
+    except Exception as ex:
+        logging.error(f">> Unknow error to load .md data to minio: {ex}")
 
 
 @dag(
@@ -89,10 +124,18 @@ def minio_to_qdrant():
         return to_process
 
     @task
-    def mineru_health():
+    def ckeck_mineru_health():
         hook_mineru = HttpHook(method="GET", http_conn_id="mineru")
         req = hook_mineru.run(endpoint="/health")
         return req.status_code
+
+    # @task
+    # def ckeck_unstruct_health():
+    #     hook = HttpHook(method="POST", http_conn_id="unstructed")
+    #     resp = hook.run(endpoint="/general/v0/general", data={})
+
+    #     print(resp.status_code)
+    #     return resp.status_code in [200, 404, 422]
 
     # Dynamic Task Mapping
     @task
@@ -100,7 +143,7 @@ def minio_to_qdrant():
         health_status: int,
         file_key: str,
         bucket_name: str,
-    ):
+    ) -> str:
         """Single def becource will be use the expand methot"""
         if health_status != 200:
             raise ValueError(f"MinerU unhealthy: {health_status}")
@@ -108,10 +151,8 @@ def minio_to_qdrant():
         hook_minio = S3Hook(aws_conn_id="minio")
 
         # ===== 1) Download file =====
-        file_name = f"/tmp/{file_key.split('/')[-1]}"
-        if os.path.exists(file_name):
-            os.unlink(file_name)
-            logging.info(f">>> Removed existing: {file_name}")
+        file_name = Path("/tmp") / file_key.split("/")[-1]
+        del_file(file_name)
 
         file_path = hook_minio.download_file(
             key=file_key,
@@ -149,51 +190,132 @@ def minio_to_qdrant():
                 "lang_list": "cyrillic",
                 "backend": "hybrid-auto-engine",
                 "parse_method": "auto",
-                "formula_enable": "true",  # Строки для form-data
+                "formula_enable": "true",
                 "table_enable": "true",
                 "return_md": "true",
                 "return_middle_json": "false",
                 "return_model_output": "false",
                 "return_content_list": "false",
-                "return_images": "true",
+                "return_images": "false",
             }
             resp = requests.post("http://mineru-api:8000/tasks", files=files, data=data)
 
-        os.unlink(file_path)
+        del_file(file_path)
         return resp.json()["task_id"]
 
     @task
-    def unstructured_process(mineru_result: dict, file_key: str) -> dict:
-        return {}
+    def save_mineru_result(mineru_task_id: str) -> list[str]:
+        hook_mineru = HttpHook(method="GET", http_conn_id="mineru")
+        req = hook_mineru.run(endpoint=f"/tasks/{mineru_task_id}/result")
+        results = req.json().get("results")
+
+        names = []
+
+        for name in results:
+            file_path = f"/tmp/{name}.md"
+
+            del_file(file_path)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(results[name]["md_content"])
+                names.append(file_path)
+                print(names)
+
+        logging.info(f"Saved files: {'\n'.join(names)}")
+        return names
+        # I could add images here
+        #
+
+    @task
+    def load_md_to_minio(mineru_result: list[str]):
+        hook = S3Hook(aws_conn_id="minio")
+        load_to_s3(hook, mineru_result)
+
+    @task
+    def unstructured_process(mineru_result: list[str]) -> list[str]:
+        out = []
+        for filepath in mineru_result:
+            with open(filepath, "rb") as f:
+                file_content = f.read()
+
+            file_ext = Path(filepath).suffix.lower()
+
+            if file_ext == ".md":
+                data = {
+                    "strategy": "fast",
+                    "chunking_strategy": "by_title",
+                    "max_characters": 1500,
+                }
+            else:
+                data = {
+                    "strategy": "hi_res",
+                    "languages": ["rus", "eng"],
+                    "infer_table_structure": True,
+                }
+
+            files = {"files": (Path(filepath).name, file_content)}
+            hook = HttpHook(method="POST", http_conn_id="unstructed")
+            resp = hook.run(
+                endpoint="/general/v0/general",
+                data=data,
+                files=files,
+                timeout=None,
+            )
+            # resp = requests.post(
+            #     url="http://unstructured:8000/general/v0/general",
+            #     data=data,
+            #     files=files,
+            #     timeout=None,
+            # )
+
+            logging.info(f">> File: {filepath} is pocessed: {resp.raise_for_status()}")
+
+            resp_json = resp.json()
+            del_file(filepath)
+
+            new_filepath = filepath.replace(".md", ".json")
+            with open(new_filepath, "w", encoding="utf-8") as f:
+                json.dump(resp_json, f, ensure_ascii=False, indent=2)
+
+            # load to minio
+            hook = S3Hook(aws_conn_id="minio")
+            load_to_s3(hook=hook, filepath=new_filepath, prefix=DEV_DATA_UNSTRUCTURED)
+
+            out.append(new_filepath)
+
+        return out
 
     @task
     def save_to_qdrant(unstructured_output: dict, file_key: str) -> bool:
         return True
 
     # ===== Grapf =====
+    # ----- 1) File to process -----
     get_buckets_data()
-    mineru_health = mineru_health()
+    mineru_health = ckeck_mineru_health()
+    # unstruct_health = ckeck_unstruct_health()
     files_task = list_files_to_process(bucket=RAG_DATA_BUCKET)
 
-    # Dynamic Task Mapping - one branch per file
-    mineru_tasks = submit_to_mineru.partial(
+    # ----- 1) Dynamic Task Mapping - one branch per file -----
+    mineru_task = submit_to_mineru.partial(
         bucket_name=RAG_DATA_BUCKET, health_status=mineru_health
     ).expand(
         file_key=files_task,
     )
 
-    # Sensor waits for completion of each task MinerU (deferrable → does not block the worker)
+    # ----- 2) Sensor waith -----
+    # Sensor waits for completion of each task MinerU
+    # (deferrable -> does not block the worker)
     mineru_wait = MineruStatusSensor.partial(
         task_id="wait_mineru",
         mineru_conn_id="mineru",
         poll_interval=60,
-    ).expand(external_task_id=mineru_tasks)
+    ).expand(external_task_id=mineru_task)
 
-    print(mineru_wait.output)
-    # unstructured_results = unstructured_process.expand(
-    #     mineru_result=mineru_wait.output,
-    #     file_key=files,
-    # )
+    # ----- 3) Save the received file -----
+    md_file = save_mineru_result.expand(mineru_task_id=mineru_wait.output)
+    load_md_to_minio.expand(mineru_result=md_file)
+
+    unstructured_results = unstructured_process.expand(mineru_result=md_file)
 
     # save_to_qdrant.expand(
     #     unstructured_output=unstructured_results,

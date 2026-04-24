@@ -67,7 +67,7 @@ class MineruTrigger(BaseTrigger):
                     file_names = js.get("file_names")
 
                     self.log.info(
-                        f"Files complited: {'\n'.join(file_names)}\nTriggering event."
+                        f"----- Files complited: {'\n'.join(file_names)}\nTriggering event."
                     )
 
                     # Fire the trigger event! This gets a worker to execute the operator's `execute_complete` method
@@ -88,10 +88,10 @@ class MineruTrigger(BaseTrigger):
                     )
                     return
             except Exception as e:
-                self.log.error(f"Polling error for {self.task_id}: {e}")
+                self.log.error(f"----- Polling error for {self.task_id}: {e}")
 
             self.log.info(
-                f"Task {self.task_id} processing. Sleeping for {self.poll_interval} seconds."
+                f"----- Task {self.task_id} processing. Sleeping for {self.poll_interval} seconds."
             )
             # If the condition is not met, the trigger sleeps for the poll_interval
             # this code can run multiple times until the condition is met
@@ -136,7 +136,9 @@ class MineruStatusSensor(BaseSensorOperator):
 
         # Starting the deferral process
         if self.deferrable:
-            self.log.info(f"Deferring to trigger for task {self.external_task_id}")
+            self.log.info(
+                f"----- Deferring to trigger for task {self.external_task_id}"
+            )
             self.defer(
                 trigger=MineruTrigger(
                     task_id=self.external_task_id,
@@ -150,7 +152,7 @@ class MineruStatusSensor(BaseSensorOperator):
 
             hook = HttpHook(method="GET", http_conn_id=self.mineru_conn_id)
             while True:
-                self.log.info("Operator in sensor mode. Polling.")
+                self.log.info("----- Operator in sensor mode. Polling.")
                 resp = hook.run(f"/tasks/{self.external_task_id}")
                 status = resp.json().get("status")
 
@@ -169,5 +171,5 @@ class MineruStatusSensor(BaseSensorOperator):
         if not event or event.get("status") == "failed":
             raise RuntimeError(event.get("error", "Unknown error in MineruTrigger"))
 
-        self.log.info(f"Task {event['task_id']} completed")
+        self.log.info(f"----- Task {event['task_id']} completed")
         return event["task_id"]
