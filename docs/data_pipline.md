@@ -210,7 +210,3 @@ QDRANT_UPSERT_BATCH = 32    # точек за один upsert запрос
 - [ ] Очистка памити системы - Mineru оставляет держит в памяти модели и нет поинта для очистки
 - [ ] Оптимизация docker images.
 - [ ] Автоматическое создание коннектов Airflow
-
-
-# RAG Retriver system
-# LLM service
