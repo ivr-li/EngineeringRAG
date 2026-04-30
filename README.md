@@ -6,6 +6,6 @@
 
 | Компонент | Описание | Документация |
 |---|---|---|
-| Data Pipeline | PDF → Qdrant через MinerU + Docling | [docs/ingestion-pipeline.md](docs/ingestion-pipeline.md) |
+| Data Pipeline | PDF → MinerU → Docling → Qdrant | [docs/ingestion-pipeline.md](docs/ingestion-pipeline.md) |
 | Retriever | Гибридный поиск(dense + sparse + ColBERT) + граф знаний | [docs/retriever.md](docs/retriever.md) |
 | LLM Service | RAG-ответы на вопросы по нормам | [docs/llm-service.md](docs/llm-service.md) |
