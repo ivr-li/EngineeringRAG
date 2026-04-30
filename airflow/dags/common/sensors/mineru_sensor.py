@@ -75,7 +75,6 @@ class MineruBatchTrigger(BaseTrigger):
             Parsed JSON response, or ``{"status": "failed", "reason": "task_not_found"}``
             when the endpoint returns ``404``.
         """
-        hook =
         hook = HttpHook(method="GET", http_conn_id=self.conn_id)
         resp = hook.run(f"/tasks/{task_id}")
 
