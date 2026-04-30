@@ -4,25 +4,29 @@ import asyncio
 from typing import Any, AsyncIterator
 
 from airflow.providers.http.hooks.http import HttpHook
-from airflow.sdk import BaseOperator, BaseSensorOperator, Context  # noqa: F401
+from airflow.sdk import BaseSensorOperator, Context
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 from asgiref.sync import sync_to_async
 
 
-class MineruBatchTrigger(BaseTrigger):
+class DoclingBatchTrigger(BaseTrigger):
     """
-    Deferrable trigger that polls MinerU until all tasks in a batch complete.
+    Deferrable trigger that polls Docling-serve until all tasks in a batch complete.
 
     Runs inside the Airflow triggerer process. Yields a single
-    ``TriggerEvent`` when every task ID reaches ``completed`` status, or
-    immediately on the first ``failed`` / ``task_not_found`` result.
+    ``TriggerEvent`` when every task ID reaches a terminal status
+    (``success`` / ``partial_success`` / ``skipped``), or immediately on
+    the first ``failure`` result.
+
+    Mirror of ``MineruBatchTrigger`` — uses the same concurrency pattern:
+    ``asyncio.gather`` polls all task IDs in the batch in parallel.
 
     Parameters
     ----------
     task_ids : list of str
-        MinerU task IDs to monitor.
+        Docling-serve task IDs to monitor.
     conn_id : str, optional
-        Airflow connection ID for the MinerU API. Default is ``"mineru"``.
+        Airflow connection ID for the Docling API. Default is ``"docling"``.
     poll_interval : int, optional
         Seconds to sleep between polling rounds. Default is ``60``.
     """
@@ -30,7 +34,7 @@ class MineruBatchTrigger(BaseTrigger):
     def __init__(
         self,
         task_ids: list[str],
-        conn_id: str = "mineru",
+        conn_id: str = "docling",
         poll_interval: int = 60,
     ):
         super().__init__()
@@ -48,7 +52,7 @@ class MineruBatchTrigger(BaseTrigger):
             Fully-qualified class path and a dict of constructor kwargs.
         """
         return (
-            "common.sensors.mineru_sensor.MineruBatchTrigger",
+            "common.sensors.docling_sensor.DoclingBatchTrigger",
             {
                 "task_ids": self.task_ids,
                 "conn_id": self.conn_id,
@@ -59,7 +63,7 @@ class MineruBatchTrigger(BaseTrigger):
     @sync_to_async
     def _check_status(self, task_id: str) -> dict:
         """
-        Fetch the current status of a single MinerU task (sync → async bridge).
+        Fetch the current status of a single Docling task (sync → async bridge).
 
         Wraps a synchronous ``HttpHook`` call with ``sync_to_async`` so it
         can be awaited inside ``asyncio.gather``.
@@ -67,21 +71,17 @@ class MineruBatchTrigger(BaseTrigger):
         Parameters
         ----------
         task_id : str
-            MinerU task ID to query via ``GET /tasks/{task_id}``.
+            Docling task ID to query via ``GET /v1/status/poll/{task_id}``.
 
         Returns
         -------
         dict
-            Parsed JSON response, or ``{"status": "failed", "reason": "task_not_found"}``
-            when the endpoint returns ``404``.
+            Parsed JSON response containing at minimum ``task_status`` and
+            optionally ``errors``.
         """
-        hook =
         hook = HttpHook(method="GET", http_conn_id=self.conn_id)
-        resp = hook.run(f"/tasks/{task_id}")
-
-        if resp.status_code == 404:
-            return {"status": "failed", "reason": "task_not_found"}
-
+        resp = hook.run(f"/v1/status/poll/{task_id}")
+        self.log.info(f">->- Resp info{resp.json()}")
         return resp.json()
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
@@ -89,21 +89,19 @@ class MineruBatchTrigger(BaseTrigger):
         Poll all task IDs concurrently until the batch is done or fails.
 
         Runs ``_check_status`` for every pending task in parallel via
-        ``asyncio.gather``. Completed tasks are removed from the pending
-        list; a single failure immediately yields a failure event and
-        returns. When all tasks complete, yields one success event carrying
-        ``task_ids`` and per-task ``file_names``.
+        ``asyncio.gather``. Tasks that reach a terminal status are removed
+        from the pending list. A single ``failure`` immediately yields a
+        failure event and stops iteration. When all tasks complete, yields
+        one success event carrying ``task_ids``.
 
         Yields
         ------
         TriggerEvent
-            ``{"status": "completed", "task_ids": [...], "results": {...}}``
-            on full success, or ``{"status": "failed", "error": "..."}`` on
-            the first failure.
+            ``{"status": "completed", "task_ids": [...]}`` on full success,
+            or ``{"status": "failed", "error": "..."}`` on the first failure.
         """
         pending = list(self.task_ids)
-        completed_results = {}
-
+        self.log.info(f">->- pending {pending}")
         while pending:
             checks = await asyncio.gather(
                 *[self._check_status(tid) for tid in pending],
@@ -111,63 +109,62 @@ class MineruBatchTrigger(BaseTrigger):
             )
 
             for task_id, result in zip(list(pending), checks):
+                self.log.info(f">->- result111{result}")
                 if isinstance(result, Exception):
                     self.log.error(f"----- Polling error for {task_id}: {result}")
                     continue
 
-                status = result.get("status")
-                if status == "failed":
-                    failure_reason = result.get("reason", "remote_failure")
+                status = result.get("task_status")
 
-                    if failure_reason == "task_not_found":
-                        self.log.error(
-                            f"----- Task {task_id} not found (pod restart). Marking failed."
-                        )
-
+                if status == "failure":
+                    error = result.get("errors", "unknown")
                     yield TriggerEvent(
                         {
                             "status": "failed",
-                            "error": f"MinerU task {task_id} failed: {failure_reason}",
+                            "error": f"Docling task {task_id} failed: {error}",
                         }
                     )
                     return
 
-                if status == "completed":
-                    completed_results[task_id] = result.get("file_names", [])
+                if status in ("success", "partial_success", "skipped"):
                     pending.remove(task_id)
-                    self.log.info(f"----- Batch task {task_id} completed")
+                    self.log.info(
+                        f"----- Batch task completed: {task_id}, erros {result.get('errors', '')}"
+                    )
 
             if pending:
                 self.log.info(
-                    f"----- Waiting for {len(pending)}/{len(self.task_ids)} tasks. Sleeping {self.poll_interval}s."
+                    f"----- Waiting for {len(pending)}/{len(self.task_ids)} Docling tasks. Sleeping {self.poll_interval}s."
                 )
                 await asyncio.sleep(self.poll_interval)
 
-        self.log.info(f"----- Batch completed: {list(completed_results.keys())}")
+        self.log.info(f"----- Batch fully completed: {self.task_ids}")
         yield TriggerEvent(
             {
                 "status": "completed",
                 "task_ids": self.task_ids,
-                "results": completed_results,  # {task_id: [file_names]}
             }
         )
 
 
-class MineruBatchStatusSensor(BaseSensorOperator):
+class DoclingBatchStatusSensor(BaseSensorOperator):
     """
-    Sensor that waits for a batch of MinerU tasks to reach terminal status.
+    Sensor that waits for a batch of Docling-serve tasks to reach terminal status.
 
-    In deferrable mode (default) the operator suspends itself via
-    ``MineruBatchTrigger``, freeing the worker slot while polling runs
-    inside the triggerer process. A non-deferrable fallback mode is
-    provided for environments that do not run a triggerer.
+    Mirror of ``MineruBatchStatusSensor``. In deferrable mode (default) the
+    operator suspends itself via ``DoclingBatchTrigger``, freeing the worker
+    slot while polling runs inside the triggerer process. A non-deferrable
+    fallback is provided for environments without a triggerer.
+
+    Returns ``list[str]`` of completed task IDs → passed to
+    ``save_docling_results`` via XCom.
 
     Parameters
     ----------
     external_task_ids : list of str
-        MinerU task IDs to monitor (``/tasks/{id}`` endpoint).
-    mineru_conn_id : str, optional
-        Airflow connection ID for the MinerU API. Default is ``"mineru"``.
+        Docling-serve task IDs to monitor (``/v1/status/poll/{id}``).
+    docling_conn_id : str, optional
+        Airflow connection ID for the Docling API. Default is ``"docling"``.
     poll_interval : int, optional
         Seconds between status checks. Default is ``60``.
     deferrable : bool, optional
@@ -177,21 +174,22 @@ class MineruBatchStatusSensor(BaseSensorOperator):
         Passed through to ``BaseSensorOperator``.
     """
 
-    ui_color = "#73deff"
+    ui_color = "#a3d9ff"
+
     template_fields = ("external_task_ids", "poll_interval")
 
     def __init__(
         self,
         *,
-        external_task_ids: list[str],  # task_id from MinerU-endpoint /tasks/{id}
-        mineru_conn_id: str = "mineru",
+        external_task_ids: list[str],
+        docling_conn_id: str = "docling",
         poll_interval: int = 60,
         deferrable: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.external_task_ids = external_task_ids
-        self.mineru_conn_id = mineru_conn_id
+        self.docling_conn_id = docling_conn_id
         self.poll_interval = poll_interval
         self.deferrable = deferrable
 
@@ -199,9 +197,9 @@ class MineruBatchStatusSensor(BaseSensorOperator):
         """
         Start monitoring the batch, deferring or blocking based on ``deferrable``.
 
-        In deferrable mode, suspends the task via ``MineruBatchTrigger`` and
+        In deferrable mode, suspends the task via ``DoclingBatchTrigger`` and
         resumes at ``execute_complete`` once the trigger fires. In fallback
-        mode, synchronously polls ``GET /tasks/{id}`` in a loop.
+        mode, synchronously polls ``GET /v1/status/poll/{id}`` in a loop.
 
         Parameters
         ----------
@@ -217,48 +215,50 @@ class MineruBatchStatusSensor(BaseSensorOperator):
         Raises
         ------
         RuntimeError
-            If any task reports ``failed`` status (fallback mode).
+            If any task reports ``failure`` status (fallback mode).
         """
         if self.deferrable:
             self.log.info(
-                f"----- Deferring batch trigger for {len(self.external_task_ids)} tasks"
+                f"----- Deferring DoclingBatchTrigger for {len(self.external_task_ids)} tasks"
             )
             self.defer(
-                trigger=MineruBatchTrigger(
+                trigger=DoclingBatchTrigger(
                     task_ids=self.external_task_ids,
-                    conn_id=self.mineru_conn_id,
+                    conn_id=self.docling_conn_id,
                     poll_interval=self.poll_interval,
                 ),
                 method_name="execute_complete",
             )
         else:
-            # Fallback sensor mode (без defer)
-            hook = HttpHook(method="GET", http_conn_id=self.mineru_conn_id)
             import time
 
-            pending = set(self.external_task_ids)
+            hook = HttpHook(method="GET", http_conn_id=self.docling_conn_id)
+            pending = list(self.external_task_ids)
             while pending:
-                for task_id in list(pending):
-                    resp = hook.run(f"/tasks/{task_id}")
-                    status = resp.json().get("status")
+                for task_id in pending:
+                    resp = hook.run(f"//v1/status/poll/{task_id}")
+                    status = resp.json().get("task_status")
 
-                    if status == "completed":
+                    if status in ("success", "partial_success", "skipped"):
                         pending.remove(task_id)
-                    elif status == "failed":
-                        raise RuntimeError(f"MinerU task {task_id} failed")
+                    elif status == "failure":
+                        raise RuntimeError(f"Docling task {task_id} failed")
+
                 if pending:
                     time.sleep(self.poll_interval)
             return self.external_task_ids
 
     def execute_complete(
-        self, context: Context, event: dict[str, Any] | None = None
+        self,
+        context: Context,
+        event: dict[str, Any] | None = None,
     ) -> list[str]:
         """
-        Resume execution after ``MineruBatchTrigger`` fires.
+        Resume execution after ``DoclingBatchTrigger`` fires.
 
         Called automatically by Airflow when the deferred trigger yields a
         ``TriggerEvent``. Raises on failure; returns task IDs on success so
-        they can be consumed by downstream tasks via XCom.
+        they can be consumed by ``save_docling_results`` via XCom.
 
         Parameters
         ----------
@@ -272,7 +272,7 @@ class MineruBatchStatusSensor(BaseSensorOperator):
         Returns
         -------
         list of str
-            Completed MinerU task IDs passed to the next task.
+            Completed Docling task IDs passed to the next task.
 
         Raises
         ------
@@ -280,8 +280,8 @@ class MineruBatchStatusSensor(BaseSensorOperator):
             If ``event`` is ``None`` or ``event["status"] == "failed"``.
         """
         if not event or event.get("status") == "failed":
-            raise RuntimeError(event.get("error", "Unknown batch error"))
+            raise RuntimeError(event.get("error", "Unknown DoclingBatchTrigger error"))
 
         task_ids = event["task_ids"]
-        self.log.info(f"----- Batch completed: {len(task_ids)} tasks")
-        return task_ids  # передается в следующую задачу
+        self.log.info(f"----- DoclingBatch completed: {len(task_ids)} tasks")
+        return task_ids

@@ -1,325 +1,365 @@
 x-airflow-common: &airflow-common
-  build:
-    context: .
-    dockerfile: ./docker/AirFlow/Dockerfile
-  image: ${AIRFLOW_IMAGE_NAME:-custom_airflow:3.2.0-python3.12}
-  env_file:
-    - .env
-  environment: &airflow-common-env
-    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    build:
+        context: .
+        dockerfile: ./docker/AirFlow/Dockerfile
+    image: ${AIRFLOW_IMAGE_NAME:-custom_airflow:3.2.0-python3.12}
+    env_file:
+        - .env
+    environment: &airflow-common-env
+        AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+        AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
 
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-    AIRFLOW__CORE__FERNET_KEY: ''
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+        AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+        AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+        AIRFLOW__CORE__FERNET_KEY: ""
+        AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+        AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+        AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver:8080/execution/"
 
-    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    PYTHONPATH: /opt/airflow/dags:/opt/airflow/plugins:/opt/airflow
+        AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+        PYTHONPATH: /opt/airflow/dags:/opt/airflow/plugins:/opt/airflow
 
-    # Connections
-    # AIRFLOW_CONN_MINIO: "aws://minioadmin:minioadmin@minio:9000?endpoint_url=http%3A%2F%2Fminio%3A9000"
-    # AIRFLOW_CONN_QDRANT: "http://@qdrant:6333"
+        # Connections
+        # AIRFLOW_CONN_MINIO: "aws://minioadmin:minioadmin@minio:9000?endpoint_url=http%3A%2F%2Fminio%3A9000"
+        # AIRFLOW_CONN_QDRANT: "http://@qdrant:6333"
 
-  volumes:
-    - ./airflow/dags:/opt/airflow/dags
-    - ./airflow/logs:/opt/airflow/logs
-    - ./airflow/config:/opt/airflow/config
-    - ./airflow/plugins:/opt/airflow/plugins
+    volumes:
+        - ./airflow/dags:/opt/airflow/dags
+        - ./airflow/logs:/opt/airflow/logs
+        - ./airflow/config:/opt/airflow/config
+        - ./airflow/plugins:/opt/airflow/plugins
 
-  user: "${AIRFLOW_UID:-50000}:0"
+    user: "${AIRFLOW_UID:-50000}:0"
 
-  depends_on: &airflow-common-depends-on
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-    minio:
-      condition: service_healthy
-    # qdrant:
-    #   condition: service_started
+    depends_on: &airflow-common-depends-on
+        postgres:
+            condition: service_healthy
+        redis:
+            condition: service_healthy
+        minio:
+            condition: service_healthy
+        # qdrant:
+        #   condition: service_started
 
 services:
-  mineru-api:
-    image: dvmed/mineru:v3.0.9
-    container_name: mineru-api
-    restart: always
-    ports:
-      - 8000:8000
-    environment:
-      MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-api
-    command: --host 0.0.0.0
-      --port 8000
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    ipc: host
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/docs"]
-    depends_on:
-      <<: *airflow-common-depends-on
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
+    docling-serve:
+        image: quay.io/docling-project/docling-serve-cu130:main
+        container_name: docling-serve
+        ports:
+            - "5001:5001"
+        environment:
+            TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata/
+            DOCLING_SERVE_ARTIFACTS_PATH: /models
+            DOCLING_SERVE_ENABLE_UI: "true"
+            DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "2"
+            # DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+            UVICORN_WORKERS: "1"
+        volumes:
+            - /home/dved/EngineeringRAG/data/docling_models:/models
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - driver: nvidia
+                          device_ids: ["0"]
+                          capabilities: [gpu]
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+    mineru-api:
+        image: dvmed/mineru:v3.0.9
+        container_name: mineru-api
+        restart: always
+        ports:
+            - 8000:8000
+        environment:
+            MINERU_MODEL_SOURCE: local
+        entrypoint: mineru-api
+        command: --host 0.0.0.0
+            --port 8000
+        ulimits:
+            memlock: -1
+            stack: 67108864
+        ipc: host
+        healthcheck:
+            test: ["CMD-SHELL", "curl -f http://localhost:8000/docs"]
+        depends_on:
+            <<: *airflow-common-depends-on
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - driver: nvidia
+                          device_ids: ["0"]
+                          capabilities: [gpu]
 
+    qdrant:
+        image: qdrant/qdrant:latest
+        container_name: qdrant
+        environment:
+            - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=128
+        restart: always
+        ports:
+            - "6333:6333"
+            - "6334:6334"
+        volumes:
+            - qdrant-storage:/qdrant/storage
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    restart: always
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant-storage:/qdrant/storage
+    # unstructured:
+    #     image: dved/unstructured-amd64-api:v0.1.2
+    #     container_name: unstructured
+    #     restart: unless-stopped
+    #     ports:
+    #         - "8001:8000"
+    #     depends_on:
+    #         <<: *airflow-common-depends-on
+    #     deploy:
+    #         resources:
+    #             reservations:
+    #                 devices:
+    #                     - driver: nvidia
+    #                       device_ids: ["0"]
+    #                       capabilities: [gpu]
 
-  unstructured:
-    image: dved/unstructured-amd64-api:v0.1.2
-    container_name: unstructured
-    restart: unless-stopped
-    ports:
-      - "8001:8000"
-    depends_on:
-      <<: *airflow-common-depends-on
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
+    minio:
+        image: minio/minio:latest
+        container_name: minio
+        restart: unless-stopped
+        command: server /data --console-address ":9001"
+        environment:
+            MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+            MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+        ports:
+            - "9000:9000"
+            - "9001:9001"
+        volumes:
+            - ./data/minio:/data
+        healthcheck:
+            test:
+                ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+            interval: 10s
+            timeout: 10s
+            retries: 5
 
-  minio:
-    image: minio/minio:latest
-    container_name: minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - ./data/minio:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 10s
-      retries: 5
-      
-  superset-db:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: superset
-      POSTGRES_PASSWORD: superset
-      POSTGRES_DB: superset
-    volumes:
-      - superset-db-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "superset"]
-      interval: 5s
-      retries: 5
-    restart: unless-stopped
+    superset-db:
+        image: postgres:16
+        environment:
+            POSTGRES_USER: superset
+            POSTGRES_PASSWORD: superset
+            POSTGRES_DB: superset
+        volumes:
+            - superset-db-volume:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD", "pg_isready", "-U", "superset"]
+            interval: 5s
+            retries: 5
+        restart: unless-stopped
 
-  superset:
-    image: apache/superset:6.1.0rc2-py312
-    ports:
-      - "5054:8088"
-    environment:
-      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-revti-etl-superset-secret-change-me}
-      SUPERSET_LOAD_EXAMPLES: "no"
-    depends_on:
-      superset-db:
-        condition: service_healthy
-    restart: unless-stopped
-    volumes:
-      - superset-home:/app/superset_home
+    superset:
+        image: apache/superset:6.1.0rc2-py312
+        ports:
+            - "5054:8088"
+        environment:
+            SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-revti-etl-superset-secret-change-me}
+            SUPERSET_LOAD_EXAMPLES: "no"
+        depends_on:
+            superset-db:
+                condition: service_healthy
+        restart: unless-stopped
+        volumes:
+            - superset-home:/app/superset_home
 
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
-    volumes:
-      - postgres-db-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 10s
-      retries: 5
-    restart: always
+    postgres:
+        image: postgres:16
+        environment:
+            POSTGRES_USER: airflow
+            POSTGRES_PASSWORD: airflow
+            POSTGRES_DB: airflow
+        volumes:
+            - postgres-db-volume:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD", "pg_isready", "-U", "airflow"]
+            interval: 10s
+            retries: 5
+        restart: always
 
-  redis:
-    image: redis:7.2-bookworm
-    expose:
-      - 6379
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 30s
-      retries: 50
-    restart: always
-    
-  airflow-apiserver:
-    <<: *airflow-common
-    command: api-server
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
+    redis:
+        image: redis:7.2-bookworm
+        expose:
+            - 6379
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 30s
+            retries: 50
+        restart: always
 
-  airflow-scheduler:
-    <<: *airflow-common
-    command: scheduler
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
+    airflow-apiserver:
+        <<: *airflow-common
+        command: api-server
+        ports:
+            - "8080:8080"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "curl",
+                    "--fail",
+                    "http://localhost:8080/api/v2/version",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+            airflow-init:
+                condition: service_completed_successfully
 
-  airflow-dag-processor:
-    <<: *airflow-common
-    command: dag-processor
-    healthcheck:
-      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
+    airflow-scheduler:
+        <<: *airflow-common
+        command: scheduler
+        healthcheck:
+            test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+            airflow-init:
+                condition: service_completed_successfully
 
-  airflow-worker:
-    <<: *airflow-common
-    command: celery worker
-    environment:
-      <<: *airflow-common-env
-      DUMB_INIT_SETSID: "0"
-    healthcheck:
-      test:
-        - "CMD-SHELL"
-        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-apiserver:
-        condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
+    airflow-dag-processor:
+        <<: *airflow-common
+        command: dag-processor
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"',
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+            airflow-init:
+                condition: service_completed_successfully
 
-  airflow-triggerer:
-    <<: *airflow-common
-    command: triggerer
-    healthcheck:
-      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
+    airflow-worker:
+        <<: *airflow-common
+        command: celery worker
+        environment:
+            <<: *airflow-common-env
+            DUMB_INIT_SETSID: "0"
+        healthcheck:
+            test:
+                - "CMD-SHELL"
+                - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+            interval: 30s
+            timeout: 10s
+            retries: 5
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+            airflow-apiserver:
+                condition: service_healthy
+            airflow-init:
+                condition: service_completed_successfully
 
-  airflow-init:
-    <<: *airflow-common
-    entrypoint: /bin/bash
-    command:
-      - -c
-      - |
-        mkdir -p /opt/airflow/{logs,dags,plugins,config}
-        chown -R "${AIRFLOW_UID}:0" /opt/airflow/
-        exec /entrypoint airflow version
-    environment:
-      <<: *airflow-common-env
-      _AIRFLOW_DB_MIGRATE: 'true'
-      _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: airflow
-      _AIRFLOW_WWW_USER_PASSWORD: airflow
-    user: "0:0"
+    airflow-triggerer:
+        <<: *airflow-common
+        command: triggerer
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"',
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+            airflow-init:
+                condition: service_completed_successfully
 
-  flower:
-    <<: *airflow-common
-    command: celery flower
-    ports:
-      - "5555:5555"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
-  warehouse-postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: ${WAREHOUSE_PG_USER:-postgres}
-      POSTGRES_PASSWORD: ${WAREHOUSE_PG_PASSWORD:-postgres}
-      POSTGRES_DB: ${WAREHOUSE_PG_DB:-warehouse}
-    ports:
-      - "5052:5432"
-    volumes:
-      - postgres-warehouse-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
-      interval: 5s
-      retries: 5
-    restart: unless-stopped
+    airflow-init:
+        <<: *airflow-common
+        entrypoint: /bin/bash
+        command:
+            - -c
+            - |
+                mkdir -p /opt/airflow/{logs,dags,plugins,config}
+                chown -R "${AIRFLOW_UID}:0" /opt/airflow/
+                exec /entrypoint airflow version
+        environment:
+            <<: *airflow-common-env
+            _AIRFLOW_DB_MIGRATE: "true"
+            _AIRFLOW_WWW_USER_CREATE: "true"
+            _AIRFLOW_WWW_USER_USERNAME: airflow
+            _AIRFLOW_WWW_USER_PASSWORD: airflow
+        user: "0:0"
 
-  client-postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: ${CLIENT_PG_USER:-postgres}
-      POSTGRES_PASSWORD: ${CLIENT_PG_PASSWORD:-postgres}
-      POSTGRES_DB: ${CLIENT_PG_DB:-postgres}
-    ports:
-      - "5051:5432"
-    volumes:
-      - ./client-postgres-init:/docker-entrypoint-initdb.d
+    flower:
+        <<: *airflow-common
+        command: celery flower
+        ports:
+            - "5555:5555"
+        healthcheck:
+            test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+        restart: always
+        depends_on:
+            <<: *airflow-common-depends-on
+            airflow-init:
+                condition: service_completed_successfully
+    warehouse-postgres:
+        image: postgres:16
+        environment:
+            POSTGRES_USER: ${WAREHOUSE_PG_USER:-postgres}
+            POSTGRES_PASSWORD: ${WAREHOUSE_PG_PASSWORD:-postgres}
+            POSTGRES_DB: ${WAREHOUSE_PG_DB:-warehouse}
+        ports:
+            - "5052:5432"
+        volumes:
+            - postgres-warehouse-volume:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD", "pg_isready", "-U", "postgres"]
+            interval: 5s
+            retries: 5
+        restart: unless-stopped
 
-  pgadmin:
-    image: dpage/pgadmin4
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@admin.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
-    ports:
-      - "5050:80"
-    restart: unless-stopped
-    
+    client-postgres:
+        image: postgres:16
+        environment:
+            POSTGRES_USER: ${CLIENT_PG_USER:-postgres}
+            POSTGRES_PASSWORD: ${CLIENT_PG_PASSWORD:-postgres}
+            POSTGRES_DB: ${CLIENT_PG_DB:-postgres}
+        ports:
+            - "5051:5432"
+        volumes:
+            - ./client-postgres-init:/docker-entrypoint-initdb.d
+
+    pgadmin:
+        image: dpage/pgadmin4
+        environment:
+            PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@admin.com}
+            PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+        ports:
+            - "5050:80"
+        restart: unless-stopped
+
 volumes:
-  airflow-db-volume:
-  superset-home:
-  superset-db-volume:
-  postgres-warehouse-volume:
-  qdrant-storage:
-  postgres-db-volume:
+    airflow-db-volume:
+    superset-home:
+    superset-db-volume:
+    postgres-warehouse-volume:
+    qdrant-storage:
+    postgres-db-volume:

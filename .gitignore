@@ -3,6 +3,8 @@
 .env
 output
 /data/
+# /data/minio
+# /data/qdrant
 client-postgres-init/
 __pycache__
 airflow/logs

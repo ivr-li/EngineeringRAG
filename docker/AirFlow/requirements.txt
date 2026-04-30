@@ -17,6 +17,8 @@ langchain-qdrant
 
 # Vector DB
 qdrant-client
+sentence_transformers
+fastembed
 
 # Utilities
 pyyaml
