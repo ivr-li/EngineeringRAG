@@ -1,0 +1,26 @@
+pendulum
+apache-airflow
+apache-airflow-providers-amazon
+apache-airflow-providers-qdrant
+
+# Core
+uvicorn[standard]
+pydantic
+python-dotenv
+requests
+
+# LangChain
+langchain
+langchain-openai
+langchain-community
+langchain-qdrant
+
+# Vector DB
+qdrant-client
+sentence_transformers
+fastembed
+
+# Utilities
+pyyaml
+click
+httpx
