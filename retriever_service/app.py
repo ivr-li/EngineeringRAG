@@ -42,10 +42,10 @@ class QueryRewriter:
     - Добавь релевантные синонимы и уточнения области применения, если очевидны.
     - Длина ответа — не более двух предложений.
     """
-    REWRITER_BASE_URL = "http://vllm-light:8020/v1"
+    REWRITER_BASE_URL = "http://localhost:8020/v1"
     REWRITER_MODEL = "query-rewriter"
 
-    def __init__(self, timeout: float = 5.0) -> None:
+    def __init__(self, timeout: float = 30.0) -> None:
         self.client = OpenAI(
             base_url=self.REWRITER_BASE_URL,
             api_key="",
@@ -182,9 +182,8 @@ class SearchRunner:
 
     def run(self, query: str, params: SidebarParams) -> None:
         effective_query, rewritten = self._maybe_rewrite(query, params)
-        self._show_rewrite_info(query, effective_query, rewritten)
         results = self._fetch_results(effective_query, params)
-        self._validate_and_store(results, query, effective_query, params)
+        self._validate_and_store(results, query, effective_query, params, rewritten)
 
     def _maybe_rewrite(self, query: str, params: SidebarParams) -> tuple[str, bool]:
         if not params.use_rewriter:
@@ -203,7 +202,6 @@ class SearchRunner:
             if params.mode == "hybrid"
             else params.mode
         )
-        print(params.filename_filter)
         with st.spinner(f"Режим: {label}, top_k={params.top_k}…"):
             return self._retriever.search(
                 query=query,
@@ -221,6 +219,7 @@ class SearchRunner:
         original_query: str,
         effective_query: str,
         params: SidebarParams,
+        rewritten: bool,
     ) -> None:
         # if not results or results[0].score < SCORE_THRESHOLD:
         #     st.warning("Документ по этой теме отсутствует в базе")
@@ -232,6 +231,7 @@ class SearchRunner:
         st.session_state["meta"] = dict(
             query=original_query,
             effective_query=effective_query,
+            was_rewritten=rewritten,
             mode=params.mode,
             top_k=params.top_k,
             prefetch_k=params.prefetch_k if params.mode == "hybrid" else None,
@@ -255,8 +255,17 @@ class ResultsView:
         st.divider()
         self._render_metrics(results, meta)
 
-        label_query = meta.get("effective_query") or meta.get("query", "")
-        st.markdown(f"##### Результаты для: *«{label_query}»*")
+        # label_query = meta.get("effective_query") or meta.get("query", "")
+        st.markdown("#### Результат:\n")
+        print(meta.get("effective_query", ""))
+        if meta.get("was_rewritten"):
+            st.markdown(
+                f"**Исходный запрос:** {meta.get('query', '')}\n\n"
+                f"**Переформулированный:** {meta.get('effective_query', '')}"
+            )
+        else:
+            st.markdown(f"**Исходный запрос:** {meta.get('query', '')}")
+        # st.markdown(f"*Перефраз: *«{meta.get('effective_query
 
         if not results:
             st.info("Ничего не найдено.")
