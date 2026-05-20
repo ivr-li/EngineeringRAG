@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Literal
 
-import onnxruntime as ort
 import torch
-from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding, TextEmbedding
 from FlagEmbedding import BGEM3FlagModel
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
     Filter,
-    Fusion,
-    FusionQuery,
+    MatchText,
     MatchValue,
     Prefetch,
     SparseVector,
@@ -21,9 +18,8 @@ from qdrant_client.models import (
 
 QDRANT_URL = "http://localhost:6333"
 QDRANT_COLLECTION = "construction_docs"
-# https://huggingface.co/BAAI/bge-m3
-
 BGE_M3_MODEL = "BAAI/bge-m3"
+DENSE_SIZE = 1024
 
 
 @lru_cache(maxsize=1)
@@ -35,15 +31,9 @@ def get_bge_m3() -> BGEM3FlagModel:
     )
 
 
-DENSE_SIZE = 1024
-
-
-PROVIDERS = (
-    ["CUDAExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
-)
+PROVIDERS = ["CUDAExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
 SearchMode = Literal["hybrid", "dense", "sparse"]
 
-print(ort.get_available_providers())
 # ==================================
 # Singleton-models
 # ==================================
@@ -57,8 +47,21 @@ class RetrievalResult:
     filename: str
     headings: list[str]
     is_table: bool
-    refs: list[str]
     chunk_index: int | None = None
+
+    # references
+    man_refs: list[str] = field(default_factory=list)
+    cross_refs: list[str] = field(default_factory=list)
+
+    # hierarchy metadata
+    section_path: str = ""
+    section_level: int = 0
+    parent_heading: str | None = None
+    leaf_heading: str | None = None
+
+    # sliding window markers
+    is_overlap_window: bool = False
+    window_index: int = 0
 
 
 # ==================================
@@ -73,18 +76,18 @@ class QdrantRetriever:
     Режимы поиска
     -------------
     hybrid (рекомендуется)
-        dense Prefetch + sparse Prefetch → ColBERT rerank (MaxSim).
+        dense Prefetch + sparse Prefetch → Colbert rerank (MaxSim).
         Широкий recall от двух сигналов + точный rerank на токен-уровне.
 
     dense
-        Только all-MiniLM-L6-v2 (ANN по HNSW).
+        Только BGE-M3 dense (ANN по HNSW).
 
     sparse
-        Только BM25 (точное вхождение терминов).
+        Только BGE-M3 BM25-sparse (точное вхождение терминов).
 
     Важно
     -----
-    ColBERT-вектор ("colbert") должен быть создан с hnsw_config.m=0 —
+    Colbert-вектор должен быть создан с hnsw_config.m=0 —
     он не используется для ANN-поиска, только для rerank через MaxSim.
     """
 
@@ -93,7 +96,7 @@ class QdrantRetriever:
         url: str = QDRANT_URL,
         collection: str = QDRANT_COLLECTION,
         timeout: int = 30,
-    ):
+    ) -> None:
         self.client = QdrantClient(url=url, timeout=timeout)
         self.collection = collection
 
@@ -105,9 +108,9 @@ class QdrantRetriever:
         mode: SearchMode = "hybrid",
         only_tables: bool | None = None,
         filename_filter: str | None = None,
+        section_filter: str | None = None,
     ) -> list[RetrievalResult]:
-
-        qdrant_filter = self._build_filter(only_tables, filename_filter)
+        qdrant_filter = self._build_filter(only_tables, filename_filter, section_filter)
 
         if mode == "dense":
             return self._search_dense(query, top_k, qdrant_filter)
@@ -117,16 +120,24 @@ class QdrantRetriever:
             return self._search_hybrid_rerank(query, top_k, prefetch_k, qdrant_filter)
 
     @staticmethod
-    def _build_filter(only_tables, filename_filter):
+    def _build_filter(
+        only_tables: bool | None,
+        filename_filter: str | None,
+        section_filter: str | None = None,
+    ) -> Filter | None:
         conditions = []
+
         if only_tables is not None:
-            conditions.append(
-                FieldCondition(key="is_table", match=MatchValue(value=only_tables))
-            )
+            conditions.append(FieldCondition(key="is_table", match=MatchValue(value=only_tables)))
         if filename_filter:
+            conditions.append(FieldCondition(key="filename", match=MatchText(text=filename_filter)))
+
+        # section_path substring match
+        if section_filter:
             conditions.append(
-                FieldCondition(key="filename", match=MatchValue(value=filename_filter))
+                FieldCondition(key="section_path", match=MatchText(text=section_filter))
             )
+
         return Filter(must=conditions) if conditions else None
 
     @staticmethod
@@ -139,8 +150,15 @@ class QdrantRetriever:
             filename=p.get("filename", ""),
             headings=p.get("headings", []),
             is_table=p.get("is_table", False),
-            refs=p.get("refs", []),
             chunk_index=p.get("chunk_index"),
+            man_refs=p.get("man_refs", []),
+            cross_refs=p.get("cross_refs", []),
+            section_path=p.get("section_path", ""),
+            section_level=p.get("section_level", 0),
+            parent_heading=p.get("parent_heading", ""),
+            leaf_heading=p.get("leaf_heading", ""),
+            is_overlap_window=p.get("is_overlap_window", False),
+            window_index=p.get("window_index", 0),
         )
 
     def _search_hybrid_rerank(
@@ -148,23 +166,19 @@ class QdrantRetriever:
         query: str,
         top_k: int,
         prefetch_k: int,
-        qdrant_filter,
+        qdrant_filter: Filter | None,
     ) -> list[RetrievalResult]:
         """
-        Hybrid search with ColBERT rerank.
-
-        Prefetch dense (prefetch_k)
-                                    -> ColBERT MaxSim rerank → top_k
-        Prefetch sparse (prefetch_k)
+        Hybrid search: dense Prefetch + sparse Prefetch → Colbert MaxSim rerank.
         """
         model = get_bge_m3()
         output = model.encode(
             [query],
+            max_length=128,  # короткий запрос — экономия памяти
             return_dense=True,
             return_sparse=True,
             return_colbert_vecs=True,
         )
-
         dense_vec = output["dense_vecs"][0].tolist()
         lw = output["lexical_weights"][0]
         colbert_vec = output["colbert_vecs"][0].tolist()
@@ -172,14 +186,14 @@ class QdrantRetriever:
         hits = self.client.query_points(
             collection_name=self.collection,
             prefetch=[
-                # semantic recall
+                # Semantic recall
                 Prefetch(
                     query=dense_vec,
                     using="dense",
                     limit=prefetch_k // 2,
                     filter=qdrant_filter,
                 ),
-                # keyword recall
+                # Keyword recall
                 Prefetch(
                     query=SparseVector(
                         indices=[int(k) for k in lw.keys()],
@@ -190,7 +204,7 @@ class QdrantRetriever:
                     filter=qdrant_filter,
                 ),
             ],
-            # ColBERT rerank
+            # Colbert rerank (MaxSim) across both prefetch sets
             query=colbert_vec,
             using="colbert",
             limit=top_k,
@@ -199,30 +213,60 @@ class QdrantRetriever:
 
         return [self._hit_to_result(h) for h in hits]
 
-    # def _search_dense(self, query, top_k, qdrant_filter) -> list[RetrievalResult]:
-    #     vec = list(get_dense_model().embed(["query: " + query]))[0].tolist()
-    #     result = self.client.query_points(
-    #         collection_name=self.collection,
-    #         query=vec,
-    #         using="dense",
-    #         limit=top_k,
-    #         query_filter=qdrant_filter,
-    #         with_payload=True,
-    #     )
-    #     return [self._hit_to_result(h) for h in result.points]
+    def _search_dense(
+        self,
+        query: str,
+        top_k: int,
+        qdrant_filter: Filter | None,
+    ) -> list[RetrievalResult]:
+        """ANN search using BGE-M3 dense vector only."""
+        model = get_bge_m3()
+        output = model.encode(
+            [query],
+            max_length=128,
+            return_dense=True,
+            return_sparse=False,
+            return_colbert_vecs=False,
+        )
+        vec = output["dense_vecs"][0].tolist()
 
-    # def _search_sparse(self, query, top_k, qdrant_filter) -> list[RetrievalResult]:
+        result = self.client.query_points(
+            collection_name=self.collection,
+            query=vec,
+            using="dense",
+            limit=top_k,
+            query_filter=qdrant_filter,
+            with_payload=True,
+        )
+        return [self._hit_to_result(h) for h in result.points]
 
-    #     sv = list(get_sparse_model().embed([query]))[0]
-    #     result = self.client.query_points(
-    #         collection_name=self.collection,
-    #         query=SparseVector(
-    #             indices=sv.indices.tolist(),
-    #             values=sv.values.tolist(),
-    #         ),
-    #         using="sparse",
-    #         limit=top_k,
-    #         query_filter=qdrant_filter,
-    #         with_payload=True,
-    #     )
-    #     return [self._hit_to_result(h) for h in result.points]
+    def _search_sparse(
+        self,
+        query: str,
+        top_k: int,
+        qdrant_filter: Filter | None,
+    ) -> list[RetrievalResult]:
+        """BM25 keyword search using BGE-M3 sparse (lexical) weights."""
+        model = get_bge_m3()
+        output = model.encode(
+            [query],
+            max_length=128,
+            return_dense=False,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        lw = output["lexical_weights"][0]
+        sv = SparseVector(
+            indices=[int(k) for k in lw.keys()],
+            values=[float(v) for v in lw.values()],
+        )
+
+        result = self.client.query_points(
+            collection_name=self.collection,
+            query=sv,
+            using="sparse",
+            limit=top_k,
+            query_filter=qdrant_filter,
+            with_payload=True,
+        )
+        return [self._hit_to_result(h) for h in result.points]

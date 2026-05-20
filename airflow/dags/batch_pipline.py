@@ -35,7 +35,7 @@ from airflow.providers.http.hooks.http import HttpHook
 from airflow.sdk import dag, task
 from common.sensors.docling_sensor import DoclingBatchStatusSensor
 from common.sensors.mineru_sensor import MineruBatchStatusSensor
-from common.txt_feature.cleaner import ChunkCleaner
+from common.txt_feature.cleaner import process_chunks
 from pendulum import datetime
 
 RAG_DATA_BUCKET = "ragfiles"
@@ -253,9 +253,7 @@ def batch_pipeline():
             candidates = []
             for pref in hook.list_prefixes(bucket_name=bucket, delimiter="/"):
                 if pref in SUP_FORMATS:
-                    candidates.extend(
-                        hook.list_keys(bucket_name=bucket, prefix=pref) or []
-                    )
+                    candidates.extend(hook.list_keys(bucket_name=bucket, prefix=pref) or [])
 
         if not skip_process:
             return candidates
@@ -375,9 +373,7 @@ def batch_pipeline():
 
             # ----- submit -----
             file_size = Path(file_path).stat().st_size
-            logging.info(
-                f">>> Submitting file to MinerU: {file_key} (size: {file_size} bytes)"
-            )
+            logging.info(f">>> Submitting file to MinerU: {file_key} (size: {file_size} bytes)")
 
             with open(file_path, "rb") as f:
                 resp = requests.post(
@@ -440,9 +436,7 @@ def batch_pipeline():
         list of str
             Absolute paths of the written ``.md`` files.
         """
-        logging.info(
-            f">>> save_mineru_results() received {len(mineru_task_ids)} task_ids"
-        )
+        logging.info(f">>> save_mineru_results() received {len(mineru_task_ids)} task_ids")
         logging.info(f">>> Task IDs: {mineru_task_ids}")
 
         hook_mineru = HttpHook(method="GET", http_conn_id="mineru")
@@ -454,9 +448,7 @@ def batch_pipeline():
             logging.info(f">>> Result response status: {req.status_code}")
             req.raise_for_status()
             results = req.json().get("results", {})
-            logging.info(
-                f">>> Result response: {json.dumps(results, ensure_ascii=False)[:500]}..."
-            )
+            logging.info(f">>> Result response: {json.dumps(results, ensure_ascii=False)[:500]}...")
 
             for name, payload in results.items():
                 file_path = f"/tmp/{name}.md"
@@ -513,10 +505,7 @@ def batch_pipeline():
         """
         hook_minio = S3Hook(aws_conn_id="minio")
 
-        keys = (
-            hook_minio.list_keys(bucket_name=RAG_DATA_BUCKET, prefix=DEV_DATA_MINERU_MD)
-            or []
-        )
+        keys = hook_minio.list_keys(bucket_name=RAG_DATA_BUCKET, prefix=DEV_DATA_MINERU_MD) or []
         return [keys[i : i + BATCH_SIZE] for i in range(0, len(keys), BATCH_SIZE)]
 
     @task()
@@ -635,8 +624,7 @@ def batch_pipeline():
                 doc_chunks = [
                     chunk
                     for chunk in all_chunks
-                    if chunk.get("meta", {}).get("origin", {}).get("filename")
-                    == file_name
+                    if chunk.get("meta", {}).get("origin", {}).get("filename") == file_name
                 ]
                 if not doc_chunks and len(documents) == 1:
                     doc_chunks = all_chunks
@@ -663,16 +651,14 @@ def batch_pipeline():
                 Ссылки извлекаются из исходного текста и сохраняются в payload,
                 что позволяет впоследствии строить граф связей между нормами.
                 """
-                all_enriched = ChunkCleaner.process(text_chunks + table_chunks)
+                all_enriched = process_chunks(text_chunks + table_chunks)
 
                 json_path = f"/tmp/{stem}.json"
                 del_file(json_path)
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(all_enriched, jf, ensure_ascii=False, indent=2)
 
-                load_to_s3(
-                    hook=hook_minio, filepath=json_path, prefix=DEV_DATA_DOCLING_JSON
-                )
+                load_to_s3(hook=hook_minio, filepath=json_path, prefix=DEV_DATA_DOCLING_JSON)
                 out_paths.append(json_path)
                 logging.info(
                     f">>> Saved {len(all_enriched)} chunks (was {len(doc_chunks)}) -> {json_path}"
@@ -686,9 +672,18 @@ def batch_pipeline():
         Ensure the Qdrant collection exists with the required vector configuration.
 
         Creates ``QDRANT_COLLECTION`` with three named vector spaces:
-        ``dense`` (384-dim cosine), ``colbert`` (128-dim multi-vector MaxSim),
+        ``dense`` (1024-dim cosine), ``colbert`` (1024-dim multi-vector MaxSim),
         and ``sparse`` (BM25 IDF), plus payload indices for fast filtering.
-        Skips creation silently if the collection already exists.
+
+        Patch vs original
+        -----------------
+        - Added 6 new payload indices for sliding-window + hierarchy metadata:
+            section_level (INTEGER), section_path (KEYWORD),
+            parent_heading (KEYWORD), leaf_heading (KEYWORD),
+            is_overlap_window (BOOL), window_index (INTEGER)
+        - Wrapped index creation in try/except so re-runs on an existing
+          collection are safe (idempotent).
+        - Fixed docstring: dense/colbert are 1024-dim, not 384/128.
 
         Returns
         -------
@@ -710,38 +705,56 @@ def batch_pipeline():
         client = QdrantClient(url=QDRANT_URL, timeout=20)
 
         existing = {c.name for c in client.get_collections().collections}
-        if QDRANT_COLLECTION in existing:
-            logging.info(f">>> Collection '{QDRANT_COLLECTION}' already exists — skip")
-            return QDRANT_COLLECTION
-
-        client.create_collection(
-            collection_name=QDRANT_COLLECTION,
-            vectors_config={
-                "dense": VectorParams(
-                    size=QDRANT_VECTOR_SIZE, distance=Distance.COSINE
-                ),
-                "colbert": VectorParams(
-                    size=QDRANT_COLBERT_SIZE,
-                    distance=Distance.COSINE,
-                    multivector_config=MultiVectorConfig(
-                        comparator=MultiVectorComparator.MAX_SIM,
+        if QDRANT_COLLECTION not in existing:
+            client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config={
+                    "dense": VectorParams(
+                        size=QDRANT_VECTOR_SIZE,  # 1024
+                        distance=Distance.COSINE,
                     ),
-                    hnsw_config=HnswConfigDiff(m=0),
-                ),
-            },
-            sparse_vectors_config={
-                "sparse": SparseVectorParams(modifier=Modifier.IDF),
-            },
-        )
-        for field, schema in [
-            ("filename", PayloadSchemaType.KEYWORD),
+                    "colbert": VectorParams(
+                        size=QDRANT_COLBERT_SIZE,  # 1024
+                        distance=Distance.COSINE,
+                        multivector_config=MultiVectorConfig(
+                            comparator=MultiVectorComparator.MAX_SIM,
+                        ),
+                        hnsw_config=HnswConfigDiff(m=0),
+                    ),
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(modifier=Modifier.IDF),
+                },
+            )
+            logging.info(f">>> Collection '{QDRANT_COLLECTION}' created")
+        else:
+            logging.info(
+                f">>> Collection '{QDRANT_COLLECTION}' already exists — adding missing indices"
+            )
+
+        # Payload indices
+        indices: list[tuple[str, PayloadSchemaType]] = [
+            ("filename", PayloadSchemaType.TEXT),
             ("headings", PayloadSchemaType.KEYWORD),
             ("is_table", PayloadSchemaType.BOOL),
             ("man_refs", PayloadSchemaType.KEYWORD),
-        ]:
-            client.create_payload_index(QDRANT_COLLECTION, field, schema)
+            # hierarchy metadata
+            ("section_level", PayloadSchemaType.INTEGER),
+            ("section_path", PayloadSchemaType.KEYWORD),
+            ("parent_heading", PayloadSchemaType.KEYWORD),
+            ("leaf_heading", PayloadSchemaType.KEYWORD),
+            # sliding-window markers
+            ("is_overlap_window", PayloadSchemaType.BOOL),
+            ("window_index", PayloadSchemaType.INTEGER),
+        ]
 
-        logging.info(f">>> Collection '{QDRANT_COLLECTION}' created")
+        for field, schema in indices:
+            try:
+                client.create_payload_index(QDRANT_COLLECTION, field, schema)
+                logging.info(f">>>   index ok: {field} ({schema.value})")
+            except Exception as ex:
+                logging.debug(f">>>   index skip: {field} — {ex}")
+
         return QDRANT_COLLECTION
 
     @task()
@@ -777,9 +790,7 @@ def batch_pipeline():
 
         # Диагностика GPU
         providers = (
-            ["CUDAExecutionProvider"]
-            if torch.cuda.is_available()
-            else ["CPUExecutionProvider"]
+            ["CUDAExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
         )
         logging.info(f">>> PROVIDERS: {providers}")
         logging.info(f">>> CUDA available: {torch.cuda.is_available()}")
@@ -806,31 +817,34 @@ def batch_pipeline():
             logging.info(f">>> Processing {len(chunks)} chunks from {path.name}")
 
             # -----Iterate in QDRANT_ENCODE_BATCH sized windows -----
-            # Цикл 1 (ENCODE_BATCH=64):  контролирует RAM модели при энкодинге
-            # Цикл 2 (UPSERT_BATCH=256): контролирует размер HTTP-запроса к Qdrant
             for enc_start in range(0, len(chunks), QDRANT_ENCODE_BATCH):
                 # ----- 1) Batching and Cheaning text into chanks -----
                 enc_batch = chunks[enc_start : enc_start + QDRANT_ENCODE_BATCH]
-                texts = [
-                    ChunkCleaner.strip_heading_prefix(
-                        c.get("text", ""), c.get("headings", [])
-                    )
-                    for c in enc_batch
-                ]
 
+                valid_chunks = []
+                texts = []
+                for c in enc_batch:
+                    text = c.get("text") if isinstance(c, dict) else None
+                    if isinstance(text, str) and text.strip():
+                        valid_chunks.append(c)
+                        texts.append(text.strip())
+
+                if not texts:
+                    logging.warning(
+                        f">>> No valid text payloads in file={path.name}, enc_offset={enc_start}; skip"
+                    )
+                    continue
                 # ----- 2) Vectors -----
                 output = model.encode(
                     texts,
                     batch_size=QDRANT_ENCODE_BATCH,
-                    max_length=512,
+                    max_length=400,
                     return_dense=True,
                     return_sparse=True,
                     return_colbert_vecs=True,
                 )
                 dense_vecs = output["dense_vecs"]  # ndarray (B, 1024)
-                lexical_vecs = output[
-                    "lexical_weights"
-                ]  # list[dict[token_id → weight]]
+                lexical_vecs = output["lexical_weights"]  # list[dict[token_id → weight]]
                 colbert_vecs = output["colbert_vecs"]  # list[ndarray(n_tok, 1024)]
 
                 # ----- 3) Build PointStruct list -----
@@ -854,29 +868,31 @@ def batch_pipeline():
                             vector={
                                 "dense": dense_vecs[i].tolist(),
                                 "sparse": SparseVector(
-                                    indices=sparse_indices,
-                                    values=sparse_values,
+                                    indices=sparse_indices, values=sparse_values
                                 ),
-                                # ColBERT: матрица (n_tokens × 128) → list[list[float]]
                                 "colbert": colbert_vecs[i].tolist(),
                             },
                             payload={
-                                "text": chunk.get(
-                                    "text", ""
-                                ),  # оригинал для отображения
-                                # Refs
-                                "man_refs": chunk["man_refs"],
-                                "cross_refs": chunk["cross_refs"],
+                                # ----- Core -----
+                                "text": chunk.get("text", ""),
+                                "filename": chunk.get("filename", path.stem),
                                 "chunk_index": chunk.get("chunk_index"),
                                 "num_tokens": chunk.get("num_tokens", 0),
-                                "headings": chunk.get(
-                                    "headings", []
-                                ),  # оригинал для отображения
-                                "doc_items": chunk.get("doc_items", []),
-                                "filename": chunk.get(
-                                    "filename", path.stem
-                                ),  # для фильтрации по файлу
                                 "is_table": chunk.get("is_table", False),
+                                # -----References -----
+                                "man_refs": chunk.get("man_refs", []),
+                                "cross_refs": chunk.get("cross_refs", []),
+                                # ----- Hierarchy -----
+                                "headings": chunk.get("headings", []),
+                                "doc_items": chunk.get("doc_items", []),
+                                # ----- Hierarchy (enrich_metadata fields)-----
+                                "section_level": chunk.get("section_level"),
+                                "section_path": chunk.get("section_path", ""),
+                                "parent_heading": chunk.get("parent_heading"),
+                                "leaf_heading": chunk.get("leaf_heading"),
+                                # ----- Sliding window markers -----
+                                "is_overlap_window": chunk.get("is_overlap_window", False),
+                                "window_index": chunk.get("window_index", 0),
                             },
                         )
                     )
@@ -888,10 +904,10 @@ def batch_pipeline():
                     total_upserted += len(sub)
                     logging.info(
                         f">>> Upserted {len(sub)} points(file={path.name},"
-                        f"enc_offset={enc_start},"
-                        f"ups_offset={ups_start})"
+                        "enc_offset={enc_start},"
+                        "ups_offset={ups_start})"
                     )
-                del dense_vecs, lexical_vecs, colbert_vecs, points, texts, enc_batch
+                del dense_vecs, lexical_vecs, colbert_vecs, points, enc_batch
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -915,9 +931,7 @@ def batch_pipeline():
         poll_interval=10,
     ).expand(external_task_ids=docling_task_ids)
     docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
-    create_qdrant_collection() >> save_to_qdrant.expand(
-        docling_json_paths=docling_chunks
-    )
+    create_qdrant_collection() >> save_to_qdrant.expand(docling_json_paths=docling_chunks)
     # ------------------------------------------------------------
     # ----- 1) Discovery -----
     # get_buckets_data()
