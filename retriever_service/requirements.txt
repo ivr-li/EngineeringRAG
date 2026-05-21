@@ -1,0 +1,4 @@
+streamlit==1.57.0
+qdrant-client==1.17.1
+fastembed-gpu==0.8.0
+pydantic-settings==2.14.0

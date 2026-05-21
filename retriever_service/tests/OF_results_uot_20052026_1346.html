@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Retrieval Eval</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#f9fafb;color:#111827;font-size:14px}
+header{background:#fff;border-bottom:1px solid #e5e7eb;padding:14px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+header h1{font-size:1.2rem;font-weight:700;flex:1}
+.metrics{display:flex;gap:10px;padding:16px 24px;flex-wrap:wrap}
+.mc{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px;min-width:110px}
+.mc .lb{color:#6b7280;font-size:.7rem;text-transform:uppercase;letter-spacing:.04em}
+.mc .vl{font-size:1.5rem;font-weight:700;margin-top:2px}
+.mc.green .vl{color:#16a34a}.mc.red .vl{color:#dc2626}.mc.blue .vl{color:#2563eb}.mc.amber .vl{color:#d97706}
+.charts{display:flex;gap:16px;padding:0 24px 16px;flex-wrap:wrap}
+.cb{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;flex:1;min-width:240px;max-width:420px}
+.cb h3{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
+.tw{padding:0 24px 32px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.07)}
+th{background:#f3f4f6;color:#4b5563;font-size:.69rem;text-transform:uppercase;letter-spacing:.04em;padding:7px 9px;text-align:left;white-space:nowrap}
+td{padding:7px 9px;border-bottom:1px solid #f3f4f6;vertical-align:top}
+tr.fail td{background:#fef2f2}tr:hover td{background:#fafafa}
+.snip{max-width:180px;font-size:.73rem;color:#6b7280}.fns{max-width:160px;font-size:.7rem;color:#6b7280}
+code{background:#f3f4f6;padding:2px 4px;border-radius:3px;font-size:.75rem}
+.score-ok{color:#16a34a;font-weight:600}.score-low{color:#dc2626;font-weight:600}
+.error{color:#dc2626}.rw{display:block;font-size:.72rem;color:#1d4ed8;margin-top:2px}
+.badge{padding:2px 6px;border-radius:20px;font-size:.65rem;font-weight:600}
+.badge-direct{background:#dbeafe;color:#1e40af}.badge-table{background:#dcfce7;color:#166534}
+.badge-chain{background:#fef9c3;color:#854d0e}.badge-absent{background:#fee2e2;color:#991b1b}
+.badge-mode_compare{background:#f3e8ff;color:#6b21a8}
+</style></head><body>
+<header>
+  <h1>📐 Retrieval Eval</h1><span style="background:#f3f4f6;color:#6b7280;padding:2px 10px;border-radius:20px;font-size:.8rem">rewriter OFF</span>
+  <span style="color:#6b7280;font-size:.8rem">2026-05-20 13:47</span>
+</header>
+<div class="metrics">
+  <div class="mc green">
+    <div class="lb">Pass Rate</div><div class="vl">100%</div></div>
+  <div class="mc green"><div class="lb">Passed</div><div class="vl">19</div></div>
+  <div class="mc red"><div class="lb">Failed</div><div class="vl">0</div></div>
+  <div class="mc blue"><div class="lb">Total</div><div class="vl">19</div></div>
+  <div class="mc amber"><div class="lb">Avg Latency</div><div class="vl">3815ms</div></div>
+  
+</div>
+<div class="charts">
+  <div class="cb"><h3>Pass Rate по категориям</h3><canvas id="cPass" height="180"></canvas></div>
+  <div class="cb"><h3>Средний Score топ-1</h3><canvas id="cScore" height="180"></canvas></div>
+</div>
+<div class="tw"><table>
+<thead><tr>
+  <th>ID</th><th>Запрос</th><th>Кат.</th><th>Mode</th>
+  <th>Score</th><th>Топ-1 текст</th><th>Топ-3 файлы</th>
+  <th>Файл</th><th>KW</th><th>Lat.</th><th>✓</th>
+</tr></thead>
+<tbody><tr class="pass">
+  <td><code>direct_01</code></td>
+  <td>Минимальная ширина эвакуационного выхода</td>
+  <td><span class="badge badge-direct">direct</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">5.6594</td>
+  <td class="snip">В любом случае при высоте выхода менее 1,9 м должно быть применено обозначение верхнего края выхода в соответствии с гост 12.4.026, а также обеспечена его травмобезопасность.
+(Измененная редакция, Изм…</td>
+  <td class="fns">СП 1.13130.2020_Эв. пути и выходы (с Изм).md<br>СП 44.13330.2011 Административные и бытовые здания. Актуализированная редакция СНиП 2.09.04-87 (с..._Текст.md<br>СП 1.13130.2020_Эв. пути и выходы (с Изм).md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>27984ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>direct_02</code></td>
+  <td>Расстояние от края проезда до стены здания для пожарных автомобилей</td>
+  <td><span class="badge badge-direct">direct</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">11.0832</td>
+  <td class="snip">8.1.2 На территории, расположенной между подъездом для пожарных автомобилей и зданием или сооружением, не допускается размещать ограждения (за исключением ограждений для палисадников), воздушные линии…</td>
+  <td class="fns">СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md<br>СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md<br>СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>4009ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>direct_03</code></td>
+  <td>Нормируемое сопротивление теплопередаче наружных стен</td>
+  <td><span class="badge badge-direct">direct</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">11.1927</td>
+  <td class="snip">Приведенное сопротивление теплопередаче ограждающих конструкций с вентилируемыми воздушными прослойками следует рассчитывать в соответствии с СП 345.1325800. При расчете температурного поля узла устан…</td>
+  <td class="fns">СП 50.13330.2024 Тепловая защита зданий_Текст.md<br>СП 50.13330.2024 Тепловая защита зданий_Текст.md<br>СП 50.13330.2024 Тепловая защита зданий_Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>2836ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>direct_04</code></td>
+  <td>Предел огнестойкости несущих конструкций REI</td>
+  <td><span class="badge badge-direct">direct</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">10.3902</td>
+  <td class="snip">обеспечить предел огнестойкости несущих конструкций наружных установок, на которых расположены оборудование и аппараты, в которых обращаются сжиженные горючие газы, легковоспламеняющиеся и горючие жид…</td>
+  <td class="fns">СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md<br>СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md<br>СП 2.13130.2020 Системы противопожарной защиты. Обеспечение огнестойкости объектов защиты.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>6518ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>direct_05</code></td>
+  <td>Инсоляция жилых помещений в многоквартирных домах продолжительность часов</td>
+  <td><span class="badge badge-direct">direct</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">9.4421</td>
+  <td class="snip">7.8 в наружных стенах подвального этажа, технического подполья и холодного чердака, не имеющих вытяжной вентиляции, следует предусматривать продухи общей площадью не менее 1/400 площади пола техническ…</td>
+  <td class="fns">СП 54.13330.2022 Здания жилые многоквартирные СНиП 31-01-2003 (с Изменениями № 1, 2)_Текст.md<br>СП 42.13330.2016 Градостроительство.md<br>СП 50.13330.2024 Тепловая защита зданий_Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>2621ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>table_01</code></td>
+  <td>Минимальная толщина защитного слоя бетона для арматуры в перекрытии</td>
+  <td><span class="badge badge-table">table</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">15.3054</td>
+  <td class="snip">- совместную работу арматуры с бетоном;
+- анкеровку арматуры в бетоне и возможность устройства стыков арматурных элементов;
+- сохранность арматуры от воздействий окружающей среды (в том числе агрессив…</td>
+  <td class="fns">СП 63.13330.2018 Бетонные и железобетонные конструкции. Основные положения. СНиП 52-01-2003 (с..._Текст (1).md<br>СП 63.13330.2018 Бетонные и железобетонные конструкции. Основные положения. СНиП 52-01-2003 (с..._Текст (1).md<br>Пособие по проектированию бетонных и железобетонных конструкций из тяжелого бетона без..._Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>1107ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>table_02</code></td>
+  <td>Допустимые прогибы балок перекрытий при пролёте 6 метров</td>
+  <td><span class="badge badge-table">table</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">11.8986</td>
+  <td class="snip">* Измененная редакция, Изм. № 1.
+Предельные прогибы элементов перекрытий (балок, ригелей, плит), лестниц, балконов, лоджий, помещений жилых и общественных зданий, а также бытовых помещений производств…</td>
+  <td class="fns">СП 20.13330.2016 Нагрузки и воздействия. Актуализированная редакция СНиП 2.01.07-85 (с Изменениями..._Текст.md<br>СП 430.1325800.2018 Монолитные конструктивные системы. Правила проектирования (с Изменением N 1)_Текст.md<br>СП 20.13330.2016 Нагрузки и воздействия. Актуализированная редакция СНиП 2.01.07-85 (с Изменениями..._Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>3629ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>table_03</code></td>
+  <td>Классификация зданий по функциональной пожарной опасности Ф1 Ф2 Ф3</td>
+  <td><span class="badge badge-table">table</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">11.6455</td>
+  <td class="snip">в зданиях классов функциональной пожарной опасности Ф1-ф4 (за исключением класса функциональной пожарной опасности Ф1.3 секционного типа) предусматривать незадымляемые лестничные клетки типа Н3 либо т…</td>
+  <td class="fns">СП 1.13130.2020_Эв. пути и выходы (с Изм).md<br>123-ФЗ_от 22_07_2008_Тех. регламент о пож. безопасности.md<br>123-ФЗ_от 22_07_2008_Тех. регламент о пож. безопасности.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>4238ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>table_04</code></td>
+  <td>Нормативная снеговая нагрузка для III снегового района кПа</td>
+  <td><span class="badge badge-table">table</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">10.4899</td>
+  <td class="snip">Примечание - Положения настоящего пункта распространяются на все случаи применения пониженных нормативных значений снеговой нагрузки, в том числе приведенных в таблице Д.1 приложения Д.2, таблице Л.1 …</td>
+  <td class="fns">СП 20.13330.2016 Нагрузки и воздействия. Актуализированная редакция СНиП 2.01.07-85 (с Изменениями..._Текст.md<br>СП 20.13330.2016 Нагрузки и воздействия. Актуализированная редакция СНиП 2.01.07-85 (с Изменениями..._Текст.md<br>СП 20.13330.2016 Нагрузки и воздействия. Актуализированная редакция СНиП 2.01.07-85 (с Изменениями..._Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>1003ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>chain_01</code></td>
+  <td>Требования к автоматической пожарной сигнализации в жилых многоквартирных домах</td>
+  <td><span class="badge badge-chain">chain</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">12.1760</td>
+  <td class="snip">6.2.3.1 Внутридомовые инженерные системы и внутриквартирное оборудование должны соответствовать требованиям [1], [2] и [13].
+6.2.3.2 Противодымная защита многоквартирных жилых зданий должна выполнятьс…</td>
+  <td class="fns">СП 54.13330.2022 Здания жилые многоквартирные СНиП 31-01-2003 (с Изменениями № 1, 2)_Текст.md<br>СП 54.13330.2022 Здания жилые многоквартирные СНиП 31-01-2003 (с Изменениями № 1, 2)_Текст.md<br>СП 253.1325800.2016 Инженерные системы высотных зданий (с Изменениями № 1, 2, 3)_Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>2157ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>chain_02</code></td>
+  <td>Молниезащита зданий с металлической кровлей категория</td>
+  <td><span class="badge badge-chain">chain</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">8.4078</td>
+  <td class="snip">2.11. Защита от прямых ударов молнии зданий и сооружений категории с неметаллической кровлей должна быть выполнена отдельно стоящими или установленными на защищаемом объекте стержневыми или тросовыми …</td>
+  <td class="fns">РД 34.21.122-87 Инструкция по устройству молниезащиты зданий и сооружений.md<br>РД 34.21.122-87 Инструкция по устройству молниезащиты зданий и сооружений.md<br>РД 34.21.122-87 Инструкция по устройству молниезащиты зданий и сооружений.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>4331ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>chain_03</code></td>
+  <td>Расстояния от стоянок автомобилей до жилых зданий норматив</td>
+  <td><span class="badge badge-chain">chain</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">8.8642</td>
+  <td class="snip">4.8 Расстояние от въезда-выезда и вентиляционных шахт наземных, подземных, обвалованных стоянок автомобилей до окон жилых домов, территорий общеобразовательных организаций, дошкольных образовательных …</td>
+  <td class="fns">СП 113.13330.2023 Стоянки автомобилей_с Изм. № 1,2,3.md<br>СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md<br>СП 113.13330.2023 Стоянки автомобилей_с Изм. № 1,2,3.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>4003ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>chain_04</code></td>
+  <td>Системы противодымной защиты вентиляция при пожаре</td>
+  <td><span class="badge badge-chain">chain</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">9.4289</td>
+  <td class="snip">11.2.4. Для зданий и сооружений, оборудованных автоматическими установками пожаротушения или автоматической пожарной сигнализацией, при пожаре следует предусматривать автоматическое блокирование элект…</td>
+  <td class="fns">СП 60.13330.2020 Отопление, вентиляция и кондиционирование воздуха СНиП 41-01-2003 (с Поправкой, с..._Текст.md<br>СП 7.13130.2013 Отопление, вентиляция и кондиционирование. Требования пожарной безопасности (с..._Текст.md<br>СП 60.13330.2020 Отопление, вентиляция и кондиционирование воздуха СНиП 41-01-2003 (с Поправкой, с..._Текст.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>2468ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>absent_01</code></td>
+  <td>При какой этажности здания требуется устройство автоматической пожарной сигнализации</td>
+  <td><span class="badge badge-absent">absent</span></td>
+  <td>hybrid</td>
+  <td class="score-low">9.7547</td>
+  <td class="snip">13.4.3.1 Системы автоматической пожарной сигнализации следует предусматривать в соответствии с [2], СП 477.1325800, СП 484.1311500.
+13.4.3.2 Элементы системы, участвующие в формировании сигналов управ…</td>
+  <td class="fns">СП 253.1325800.2016 Инженерные системы высотных зданий (с Изменениями № 1, 2, 3)_Текст.md<br>123-ФЗ_от 22_07_2008_Тех. регламент о пож. безопасности.md<br>СП 44.13330.2011 Административные и бытовые здания. Актуализированная редакция СНиП 2.09.04-87 (с..._Текст.md</td>
+  <td>🔴</td>
+  <td>🟢</td>
+  <td>491ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>absent_02</code></td>
+  <td>Требования к сейсмостойкости зданий в зоне 8 баллов</td>
+  <td><span class="badge badge-absent">absent</span></td>
+  <td>hybrid</td>
+  <td class="score-low">9.7519</td>
+  <td class="snip">14.1.1 При проектировании тепловых пунктов в районах с сейсмичностью 8 баллов и более, на вечномерзлых грунтах, на подрабатываемых территориях и в районах с просадочными от замачивания грунтами I-го т…</td>
+  <td class="fns">СП 510.1325800.2022 Тепловые пункты и системы внутреннего теплоснабжения_Текст.md<br>СП 22.13330.2016 Основания зданий и сооружений. Актуализированная редакция СНиП 2.02.01-83.md<br>СП 522.1325800.2023 Системы фасадные навесные вентилируемые. Правила проектирования, производства.md</td>
+  <td>🔴</td>
+  <td>🟢</td>
+  <td>1742ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>absent_03</code></td>
+  <td>Нормы освещённости для офисных помещений люкс</td>
+  <td><span class="badge badge-absent">absent</span></td>
+  <td>hybrid</td>
+  <td class="score-low">8.6496</td>
+  <td class="snip">Освещенность помещений следует принимать по СП 52.13330 и [42]. В палатах должно быть предусмотрено общее ночное освещение 5 лк, местное освещение в консолях - для чтения 200 лк, для осмотра 300 лк. В…</td>
+  <td class="fns">СП 158.13330.2014 Здания и помещения медицинских организаций. Правила проектирования (с Изменениями..._Текст.md<br>СП 54.13330.2022 Здания жилые многоквартирные СНиП 31-01-2003 (с Изменениями № 1, 2)_Текст.md<br>СП 158.13330.2014 Здания и помещения медицинских организаций. Правила проектирования (с Изменениями..._Текст.md</td>
+  <td>🔴</td>
+  <td>🟢</td>
+  <td>2141ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>mode_hybrid</code></td>
+  <td>таблица классов конструктивной пожарной опасности REI огнестойкость несущих конструкций</td>
+  <td><span class="badge badge-mode_compare">mode_compare</span></td>
+  <td>hybrid</td>
+  <td class="score-ok">13.6778</td>
+  <td class="snip">| Kлasсконструктивнойпожарнойопасностиздания | Класс пожарной опасности строительных конструкций | Класс пожарной опасности строительных конструкций | Класс пожарной опасности строительных конструкций…</td>
+  <td class="fns">123-ФЗ_от 22_07_2008_Тех. регламент о пож. безопасности.md<br>СП 2.13130.2020 Системы противопожарной защиты. Обеспечение огнестойкости объектов защиты.md<br>СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>905ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>mode_dense</code></td>
+  <td>таблица классов конструктивной пожарной опасности REI огнестойкость несущих конструкций</td>
+  <td><span class="badge badge-mode_compare">mode_compare</span></td>
+  <td>dense</td>
+  <td class="score-ok">0.7111</td>
+  <td class="snip">| Kлasсконструктивнойпожарнойопасностиздания | Класс пожарной опасности строительных конструкций | Класс пожарной опасности строительных конструкций | Класс пожарной опасности строительных конструкций…</td>
+  <td class="fns">123-ФЗ_от 22_07_2008_Тех. регламент о пож. безопасности.md<br>СП 2.13130.2020 Системы противопожарной защиты. Обеспечение огнестойкости объектов защиты.md<br>СП 2.13130.2020 Системы противопожарной защиты. Обеспечение огнестойкости объектов защиты.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>69ms</td>
+  <td>✅</td>
+</tr><tr class="pass">
+  <td><code>mode_sparse</code></td>
+  <td>таблица классов конструктивной пожарной опасности REI огнестойкость несущих конструкций</td>
+  <td><span class="badge badge-mode_compare">mode_compare</span></td>
+  <td>sparse</td>
+  <td class="score-low">0.4342</td>
+  <td class="snip">(Наименование в редакции, введенной в действие с 12 июля 2012 года Федеральным законом от 10 июля 2012 года № 117-Ф3. - См. предыдущую редакцию)
+1. Части зданий, сооружений, пожарных отсеков, а также …</td>
+  <td class="fns">123-ФЗ_от 22_07_2008_Тех. регламент о пож. безопасности.md<br>СП 2.13130.2020 Системы противопожарной защиты. Обеспечение огнестойкости объектов защиты.md<br>СП 4.13130.2013 Системы противопожарной защиты. Ограничение распространения пожара на объектах.md</td>
+  <td>🟢</td>
+  <td>🟢</td>
+  <td>241ms</td>
+  <td>✅</td>
+</tr></tbody>
+</table></div>
+<script>
+const pal=['#2563eb','#16a34a','#d97706','#dc2626','#7c3aed'];
+new Chart(document.getElementById('cPass'),{type:'bar',
+  data:{labels:["direct", "table", "chain", "absent", "mode_compare"],datasets:[{data:[100.0, 100.0, 100.0, 100.0, 100.0],backgroundColor:pal,borderRadius:5}]},
+  options:{plugins:{legend:{display:false}},scales:{
+    y:{min:0,max:110,ticks:{color:'#6b7280',callback:v=>v+'%'},grid:{color:'#f3f4f6'}},
+    x:{ticks:{color:'#374151'},grid:{display:false}}}}
+});
+new Chart(document.getElementById('cScore'),{type:'bar',
+  data:{labels:["direct", "table", "chain", "absent", "mode_compare"],datasets:[{data:[9.5535, 12.3348, 9.7193, 9.3854, 4.941],backgroundColor:pal,borderRadius:5}]},
+  options:{plugins:{legend:{display:false}},scales:{
+    y:{ticks:{color:'#6b7280'},grid:{color:'#f3f4f6'}},
+    x:{ticks:{color:'#374151'},grid:{display:false}}}}
+});
+</script></body></html>

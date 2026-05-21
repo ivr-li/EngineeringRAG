@@ -1,32 +1,8 @@
-"""
-Batch Document Ingestion Pipeline
-==================================
-End-to-end pipeline that discovers PDF files in MinIO, converts them to
-Markdown via MinerU (OCR), chunks the Markdown hierarchically via Docling,
-and upserts dense / sparse / ColBERT vectors into a Qdrant collection.
-
-Pipeline stages
----------------
-1. **Discovery** – list buckets, filter supported formats, skip already-processed files.
-2. **Batching** – split file keys into fixed-size batches for parallel processing.
-3. **MinerU OCR** – submit batches, wait (deferrable sensor), retrieve ``.md`` results.
-4. **MinIO upload** – persist ``.md`` files under ``dev_data/mineru_md/``.
-5. **Docling chunking** – hierarchical Markdown chunking via async Docling API.
-6. **Enrichment** – extract normative references, tag tables, clean OCR artefacts.
-7. **Qdrant upsert** – encode with dense / sparse / ColBERT models and upsert points.
-
-Connections required
---------------------
-minio, mineru, docling
-"""
-
-from __future__ import annotations
-
 import json
 import logging
-import re
 import uuid
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 import requests
@@ -35,6 +11,7 @@ from airflow.providers.http.hooks.http import HttpHook
 from airflow.sdk import dag, task
 from common.sensors.docling_sensor import DoclingBatchStatusSensor
 from common.sensors.mineru_sensor import MineruBatchStatusSensor
+from common.txt_feature.cleaner import process_chunks
 from pendulum import datetime
 
 RAG_DATA_BUCKET = "ragfiles"
@@ -46,12 +23,11 @@ BATCH_SIZE = 16
 
 QDRANT_URL = "http://qdrant:6333"
 QDRANT_COLLECTION = "construction_docs"
-QDRANT_DENSE_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-QDRANT_COLBERT_MODEL = "colbert-ir/colbertv2.0"
-QDRANT_VECTOR_SIZE = 384
-QDRANT_ENCODE_BATCH = 64
-QDRANT_UPSERT_BATCH = 64
-QDRANT_COLBERT_SIZE = 128
+BGE_M3_MODEL = "BAAI/bge-m3"
+QDRANT_VECTOR_SIZE = 1024
+QDRANT_ENCODE_BATCH = 16
+QDRANT_UPSERT_BATCH = 32
+QDRANT_COLBERT_SIZE = 1024
 
 
 # ============================================================
@@ -72,7 +48,7 @@ def load_to_s3(
     filepath: str | list[str],
     bucket_name: str = RAG_DATA_BUCKET,
     prefix: str = DEV_DATA_MINERU_MD,
-) -> lst[str] | None:
+) -> list[str] | None:
     """
     Upload one or more local files to MinIO (S3-compatible storage).
 
@@ -122,65 +98,16 @@ def batch_list(items: list, batch_size: int = BATCH_SIZE) -> list[list]:
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
 
-def clean_chunk_text(text: str) -> str:
-    """
-    Remove common OCR artefacts from chunk text before vectorisation.
+@lru_cache(maxsize=1)
+def get_bge_m3():
+    import torch
+    from FlagEmbedding import BGEM3FlagModel
 
-    Normalises excess whitespace, collapses repeated newlines, fixes
-    hyphenated number ranges, and strips repeated pipe characters.
-
-    Parameters
-    ----------
-    text : str
-        Raw OCR text from a document chunk.
-
-    Returns
-    -------
-    str
-        Cleaned text, or the original value if it was empty / falsy.
-    """
-    if not text:
-        return text
-    # spaces and hyphenation
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    # Spaces around the hyphen in numbers: "4 4 4" cannot be fixed, but "44 -45" → "44-45"
-    text = re.sub(r"(\d)\s*[-–]\s*(\d)", r"\1–\2", text)
-    # OCR special characters
-    text = re.sub(r"[|]{2,}", "", text)
-    return text.strip()
-
-
-def execute_refs(text: str) -> list[str]:
-    """
-    Extract normative document references from chunk text.
-
-    Searches for Russian building-code patterns: СП, СНиП, ГОСТ,
-    paragraph numbers, table / figure references, and appendix labels.
-
-    Parameters
-    ----------
-    text : str
-        Plain text of a document chunk.
-
-    Returns
-    -------
-    list of str
-        Deduplicated list of matched reference strings.
-        Returns an empty list when no patterns are found.
-    """
-    patterns = [
-        r"[Сс][Пп]\s*\d+[.\d]*"  # СП 63.13330
-        r"[СсГг][НнОо][ИиСс][ПпТт]\s*[\d.\-]+"  # СНиП, ГОСТ
-        r"[Пп]\.?\s*\d+[\.\d]*"  # п. 3.45
-        r"[Тт]абл(?:ица|\.)\s*\d+",  # таблица 7 / табл. 7
-        r"[Рр]ис(?:унок|\.)\s*\d+",  # рисунок 3
-        r"[Пп]риложени[еяй]\s*[А-ЯA-Z\d]+",  # приложение А
-    ]
-    refs = []
-    for pat in patterns:
-        refs.extend(re.findall(pat, text))
-    return list(set(refs))
+    return BGEM3FlagModel(
+        BGE_M3_MODEL,
+        use_fp16=torch.cuda.is_available(),  # fp16 for gpu, fp32 for cpu
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
 
 
 # ============================================================
@@ -302,9 +229,7 @@ def batch_pipeline():
             candidates = []
             for pref in hook.list_prefixes(bucket_name=bucket, delimiter="/"):
                 if pref in SUP_FORMATS:
-                    candidates.extend(
-                        hook.list_keys(bucket_name=bucket, prefix=pref) or []
-                    )
+                    candidates.extend(hook.list_keys(bucket_name=bucket, prefix=pref) or [])
 
         if not skip_process:
             return candidates
@@ -423,6 +348,9 @@ def batch_pipeline():
             logging.info(f">>> Downloaded: {file_path}")
 
             # ----- submit -----
+            file_size = Path(file_path).stat().st_size
+            logging.info(f">>> Submitting file to MinerU: {file_key} (size: {file_size} bytes)")
+
             with open(file_path, "rb") as f:
                 resp = requests.post(
                     "http://mineru-api:8000/tasks",
@@ -439,9 +367,21 @@ def batch_pipeline():
                         "return_content_list": "false",
                         "return_images": "false",
                     },
+                    timeout=120,
                 )
+
+            logging.info(f">>> MinerU response status: {resp.status_code}")
+            logging.info(f">>> MinerU response headers: {dict(resp.headers)}")
+
             resp.raise_for_status()
-            tid = resp.json()["task_id"]
+            response_json = resp.json()
+            logging.info(
+                f">>> MinerU full response: {json.dumps(response_json, ensure_ascii=False)}"
+            )
+
+            tid = response_json.get("task_id")
+            if not tid:
+                raise ValueError(f"Task ID not found in response: {response_json}")
             task_ids.append(tid)
             logging.info(f">>> Submitted {file_key} -> task_id: {tid}")
 
@@ -451,7 +391,7 @@ def batch_pipeline():
         return task_ids
 
     # ------------------------------------------------------------------------------------------------
-    # 4. Save MinerU results (runs AFTER sensor confirms completion)
+    # 4. Save MinerU results
     # ------------------------------------------------------------------------------------------------
 
     @task()
@@ -472,13 +412,19 @@ def batch_pipeline():
         list of str
             Absolute paths of the written ``.md`` files.
         """
+        logging.info(f">>> save_mineru_results() received {len(mineru_task_ids)} task_ids")
+        logging.info(f">>> Task IDs: {mineru_task_ids}")
+
         hook_mineru = HttpHook(method="GET", http_conn_id="mineru")
         all_paths: list[str] = []
 
         for task_id in mineru_task_ids:
+            logging.info(f">>> Fetching result for task_id: {task_id}")
             req = hook_mineru.run(endpoint=f"/tasks/{task_id}/result")
+            logging.info(f">>> Result response status: {req.status_code}")
             req.raise_for_status()
             results = req.json().get("results", {})
+            logging.info(f">>> Result response: {json.dumps(results, ensure_ascii=False)[:500]}...")
 
             for name, payload in results.items():
                 file_path = f"/tmp/{name}.md"
@@ -487,6 +433,7 @@ def batch_pipeline():
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(payload["md_content"])
                 all_paths.append(file_path)
+                logging.info(f">>> Saved result to: {file_path}")
 
         logging.info(f">>> Saved {len(all_paths)} .md files from batch")
         return all_paths
@@ -534,10 +481,7 @@ def batch_pipeline():
         """
         hook_minio = S3Hook(aws_conn_id="minio")
 
-        keys = (
-            hook_minio.list_keys(bucket_name=RAG_DATA_BUCKET, prefix=DEV_DATA_MINERU_MD)
-            or []
-        )
+        keys = hook_minio.list_keys(bucket_name=RAG_DATA_BUCKET, prefix=DEV_DATA_MINERU_MD) or []
         return [keys[i : i + BATCH_SIZE] for i in range(0, len(keys), BATCH_SIZE)]
 
     @task()
@@ -656,8 +600,7 @@ def batch_pipeline():
                 doc_chunks = [
                     chunk
                     for chunk in all_chunks
-                    if chunk.get("meta", {}).get("origin", {}).get("filename")
-                    == file_name
+                    if chunk.get("meta", {}).get("origin", {}).get("filename") == file_name
                 ]
                 if not doc_chunks and len(documents) == 1:
                     doc_chunks = all_chunks
@@ -684,22 +627,18 @@ def batch_pipeline():
                 Ссылки извлекаются из исходного текста и сохраняются в payload,
                 что позволяет впоследствии строить граф связей между нормами.
                 """
-                all_enriched: list[dict] = []
-                for chunk in text_chunks + table_chunks:
-                    chunk["is_table"] = chunk.get("is_table", False)
-                    chunk["refs"] = execute_refs(chunk.get("text", ""))
-                    all_enriched.append(chunk)
+                all_enriched = process_chunks(text_chunks + table_chunks)
 
                 json_path = f"/tmp/{stem}.json"
                 del_file(json_path)
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(all_enriched, jf, ensure_ascii=False, indent=2)
 
-                load_to_s3(
-                    hook=hook_minio, filepath=json_path, prefix=DEV_DATA_DOCLING_JSON
-                )
+                load_to_s3(hook=hook_minio, filepath=json_path, prefix=DEV_DATA_DOCLING_JSON)
                 out_paths.append(json_path)
-                logging.info(f">>> Saved {len(doc_chunks)} chunks -> {json_path}")
+                logging.info(
+                    f">>> Saved {len(all_enriched)} chunks (was {len(doc_chunks)}) -> {json_path}"
+                )
 
         return out_paths
 
@@ -709,9 +648,18 @@ def batch_pipeline():
         Ensure the Qdrant collection exists with the required vector configuration.
 
         Creates ``QDRANT_COLLECTION`` with three named vector spaces:
-        ``dense`` (384-dim cosine), ``colbert`` (128-dim multi-vector MaxSim),
+        ``dense`` (1024-dim cosine), ``colbert`` (1024-dim multi-vector MaxSim),
         and ``sparse`` (BM25 IDF), plus payload indices for fast filtering.
-        Skips creation silently if the collection already exists.
+
+        Patch vs original
+        -----------------
+        - Added 6 new payload indices for sliding-window + hierarchy metadata:
+            section_level (INTEGER), section_path (KEYWORD),
+            parent_heading (KEYWORD), leaf_heading (KEYWORD),
+            is_overlap_window (BOOL), window_index (INTEGER)
+        - Wrapped index creation in try/except so re-runs on an existing
+          collection are safe (idempotent).
+        - Fixed docstring: dense/colbert are 1024-dim, not 384/128.
 
         Returns
         -------
@@ -721,6 +669,7 @@ def batch_pipeline():
         from qdrant_client import QdrantClient
         from qdrant_client.models import (
             Distance,
+            HnswConfigDiff,
             Modifier,
             MultiVectorComparator,
             MultiVectorConfig,
@@ -729,40 +678,59 @@ def batch_pipeline():
             VectorParams,
         )
 
-        client = QdrantClient(url=QDRANT_URL)
+        client = QdrantClient(url=QDRANT_URL, timeout=20)
 
         existing = {c.name for c in client.get_collections().collections}
-        if QDRANT_COLLECTION in existing:
-            logging.info(f">>> Collection '{QDRANT_COLLECTION}' already exists — skip")
-            return QDRANT_COLLECTION
-
-        client.create_collection(
-            collection_name=QDRANT_COLLECTION,
-            vectors_config={
-                "dense": VectorParams(
-                    size=QDRANT_VECTOR_SIZE, distance=Distance.COSINE
-                ),
-                "colbert": VectorParams(
-                    size=QDRANT_COLBERT_SIZE,
-                    distance=Distance.COSINE,
-                    multivector_config=MultiVectorConfig(
-                        comparator=MultiVectorComparator.MAX_SIM,
+        if QDRANT_COLLECTION not in existing:
+            client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config={
+                    "dense": VectorParams(
+                        size=QDRANT_VECTOR_SIZE,  # 1024
+                        distance=Distance.COSINE,
                     ),
-                ),
-            },
-            sparse_vectors_config={
-                "sparse": SparseVectorParams(modifier=Modifier.IDF),
-            },
-        )
-        for field, schema in [
-            ("filename", PayloadSchemaType.KEYWORD),
+                    "colbert": VectorParams(
+                        size=QDRANT_COLBERT_SIZE,  # 1024
+                        distance=Distance.COSINE,
+                        multivector_config=MultiVectorConfig(
+                            comparator=MultiVectorComparator.MAX_SIM,
+                        ),
+                        hnsw_config=HnswConfigDiff(m=0),
+                    ),
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(modifier=Modifier.IDF),
+                },
+            )
+            logging.info(f">>> Collection '{QDRANT_COLLECTION}' created")
+        else:
+            logging.info(
+                f">>> Collection '{QDRANT_COLLECTION}' already exists — adding missing indices"
+            )
+
+        # Payload indices
+        indices: list[tuple[str, PayloadSchemaType]] = [
+            ("filename", PayloadSchemaType.TEXT),
             ("headings", PayloadSchemaType.KEYWORD),
             ("is_table", PayloadSchemaType.BOOL),
-            ("refs", PayloadSchemaType.KEYWORD),
-        ]:
-            client.create_payload_index(QDRANT_COLLECTION, field, schema)
+            ("man_refs", PayloadSchemaType.KEYWORD),
+            # hierarchy metadata
+            ("section_level", PayloadSchemaType.INTEGER),
+            ("section_path", PayloadSchemaType.KEYWORD),
+            ("parent_heading", PayloadSchemaType.KEYWORD),
+            ("leaf_heading", PayloadSchemaType.KEYWORD),
+            # sliding-window markers
+            ("is_overlap_window", PayloadSchemaType.BOOL),
+            ("window_index", PayloadSchemaType.INTEGER),
+        ]
 
-        logging.info(f">>> Collection '{QDRANT_COLLECTION}' created")
+        for field, schema in indices:
+            try:
+                client.create_payload_index(QDRANT_COLLECTION, field, schema)
+                logging.info(f">>>   index ok: {field} ({schema.value})")
+            except Exception as ex:
+                logging.debug(f">>>   index skip: {field} — {ex}")
+
         return QDRANT_COLLECTION
 
     @task()
@@ -790,23 +758,27 @@ def batch_pipeline():
         int
             Total number of points upserted across all files.
         """
-        from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding
+        import gc
+
+        import torch
         from qdrant_client import QdrantClient
         from qdrant_client.models import PointStruct, SparseVector
-        from sentence_transformers import SentenceTransformer
+
+        # Диагностика GPU
+        providers = (
+            ["CUDAExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
+        )
+        logging.info(f">>> PROVIDERS: {providers}")
+        logging.info(f">>> CUDA available: {torch.cuda.is_available()}")
+        logging.info(f">>> PROVIDERS: {providers}")
+        if torch.cuda.is_available():
+            logging.info(f">>> GPU: {torch.cuda.get_device_name(0)}")
 
         client = QdrantClient(
             url=QDRANT_URL,
             timeout=120,
         )
-
-        dense_model = SentenceTransformer(
-            QDRANT_DENSE_MODEL
-        )  # Understands the meaning of the text and semantic similarity
-        sparse_model = SparseTextEmbedding(
-            "Qdrant/bm25"
-        )  # Exact lexical word matching, like a classic search
-        colbert_model = LateInteractionTextEmbedding(QDRANT_COLBERT_MODEL)
+        model = get_bge_m3()
         total_upserted = 0
 
         for json_path in docling_json_paths:
@@ -821,26 +793,35 @@ def batch_pipeline():
             logging.info(f">>> Processing {len(chunks)} chunks from {path.name}")
 
             # -----Iterate in QDRANT_ENCODE_BATCH sized windows -----
-            # Цикл 1 (ENCODE_BATCH=64):  контролирует RAM модели при энкодинге
-            # Цикл 2 (UPSERT_BATCH=256): контролирует размер HTTP-запроса к Qdrant
             for enc_start in range(0, len(chunks), QDRANT_ENCODE_BATCH):
                 # ----- 1) Batching and Cheaning text into chanks -----
                 enc_batch = chunks[enc_start : enc_start + QDRANT_ENCODE_BATCH]
-                texts = [clean_chunk_text(c.get("text", "")) for c in enc_batch]
 
+                valid_chunks = []
+                texts = []
+                for c in enc_batch:
+                    text = c.get("text") if isinstance(c, dict) else None
+                    if isinstance(text, str) and text.strip():
+                        valid_chunks.append(c)
+                        texts.append(text.strip())
+
+                if not texts:
+                    logging.warning(
+                        f">>> No valid text payloads in file={path.name}, enc_offset={enc_start}; skip"
+                    )
+                    continue
                 # ----- 2) Vectors -----
-                dense_vecs = dense_model.encode(
+                output = model.encode(
                     texts,
                     batch_size=QDRANT_ENCODE_BATCH,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                ).tolist()  # all-MiniLM-L6-v2, dim=384
-
-                sparse_vecs = list(sparse_model.embed(texts))
-
-                colbert_vecs = list(
-                    colbert_model.embed(texts)
-                )  # list[ndarray(n_tokens, 128)] — рахмер матрицы разный для каждого чанка
+                    max_length=400,
+                    return_dense=True,
+                    return_sparse=True,
+                    return_colbert_vecs=True,
+                )
+                dense_vecs = output["dense_vecs"]  # ndarray (B, 1024)
+                lexical_vecs = output["lexical_weights"]  # list[dict[token_id → weight]]
+                colbert_vecs = output["colbert_vecs"]  # list[ndarray(n_tok, 1024)]
 
                 # ----- 3) Build PointStruct list -----
                 points: list[PointStruct] = []
@@ -854,33 +835,40 @@ def batch_pipeline():
                         )
                     )
 
-                    sv = sparse_vecs[i]
-                    cv = colbert_vecs[i]
+                    lw = lexical_vecs[i]  # dict {token_id_str: weight}
+                    sparse_indices = [int(k) for k in lw.keys()]
+                    sparse_values = [float(v) for v in lw.values()]
                     points.append(
                         PointStruct(
                             id=point_id,
                             vector={
-                                "dense": dense_vecs[i],
+                                "dense": dense_vecs[i].tolist(),
                                 "sparse": SparseVector(
-                                    indices=sv.indices.tolist(),
-                                    values=sv.values.tolist(),
-                                ),  # Matrix (n_tokens × 128): Qdrant: list[list[float]]
-                                "colbert": cv.tolist(),
+                                    indices=sparse_indices, values=sparse_values
+                                ),
+                                "colbert": colbert_vecs[i].tolist(),
                             },
                             payload={
-                                "text": chunk.get(
-                                    "text", ""
-                                ),  # оригинал для отображения
+                                # ----- Core -----
+                                "text": chunk.get("text", ""),
+                                "filename": chunk.get("filename", path.stem),
                                 "chunk_index": chunk.get("chunk_index"),
-                                "headings": chunk.get(
-                                    "headings", []
-                                ),  # для фильтрации по разделу
-                                "doc_items": chunk.get("doc_items", []),
-                                "filename": chunk.get(
-                                    "filename", path.stem
-                                ),  # для фильтрации по файлу
+                                "num_tokens": chunk.get("num_tokens", 0),
                                 "is_table": chunk.get("is_table", False),
-                                "refs": chunk.get("refs", []),
+                                # -----References -----
+                                "man_refs": chunk.get("man_refs", []),
+                                "cross_refs": chunk.get("cross_refs", []),
+                                # ----- Hierarchy -----
+                                "headings": chunk.get("headings", []),
+                                "doc_items": chunk.get("doc_items", []),
+                                # ----- Hierarchy (enrich_metadata fields)-----
+                                "section_level": chunk.get("section_level"),
+                                "section_path": chunk.get("section_path", ""),
+                                "parent_heading": chunk.get("parent_heading"),
+                                "leaf_heading": chunk.get("leaf_heading"),
+                                # ----- Sliding window markers -----
+                                "is_overlap_window": chunk.get("is_overlap_window", False),
+                                "window_index": chunk.get("window_index", 0),
                             },
                         )
                     )
@@ -892,9 +880,13 @@ def batch_pipeline():
                     total_upserted += len(sub)
                     logging.info(
                         f">>> Upserted {len(sub)} points(file={path.name},"
-                        f"enc_offset={enc_start},"
-                        f"ups_offset={ups_start})"
+                        "enc_offset={enc_start},"
+                        "ups_offset={ups_start})"
                     )
+                del dense_vecs, lexical_vecs, colbert_vecs, points, enc_batch
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             logging.info(f">>> Done: {path.name}, running total={total_upserted}")
 
@@ -904,68 +896,66 @@ def batch_pipeline():
     # Graph
     # ==========================================================
     # ----- 0) Docling single precess -----
-    md_loaded = single_docling()
-    docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(
-        mineru_result=md_loaded
-    )
-
-    docling_wait = DoclingBatchStatusSensor.partial(
-        task_id="wait_docling_batch",
-        docling_conn_id="docling",
-        poll_interval=10,
-    ).expand(external_task_ids=docling_task_ids)
-    docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
-    create_qdrant_collection() >> save_to_qdrant.expand(
-        docling_json_paths=docling_chunks
-    )
-    # ------------------------------------------------------------
-    # ----- 1) Discovery -----
-    # get_buckets_data()
-    # mineru_health = check_mineru_health()
-    # qdrant_health = create_qdrant_collection()
-    # files_task = list_files_to_process(bucket=RAG_DATA_BUCKET)
-    # # ----- 2) Split into batches of BATCH_SIZE -----
-    # file_batches = create_file_batches(files_task)
-    # # [["f1","f2",...,"f8"], ["f9","f10",...], ...]
-
-    # # ----- 3) Submit each batch to MinerU (one dynamic task per batch) -----
-    # mineru_task_ids = batch_mineru_submit.partial(
-    #     bucket_name=RAG_DATA_BUCKET,
-    #     health_status=mineru_health,
-    #     qerant_status=qdrant_health,
-    # ).expand(file_keys=file_batches)
-    # # [["tid1","tid2",...], ["tid9",...], ...]
-
-    # # ----- 4) Deferrable sensor - async wait for each batch (frees workers) -----
-    # mineru_wait = MineruBatchStatusSensor.partial(
-    #     task_id="wait_mineru_batch",
-    #     mineru_conn_id="mineru",
-    #     poll_interval=60,
-    # ).expand(external_task_ids=mineru_task_ids)
-    # # output: [["tid1","tid2",...], ["tid9",...], ...]
-
-    # # ----- 5) Save .md files per batch -----
-    # md_files = save_mineru_results.expand(mineru_task_ids=mineru_wait.output)
-
-    # # ----- 6) Upload .md to MinIO per batch -----
-    # md_loaded = load_md_to_minio.expand(mineru_result=md_files)
-
-    # # ----- 7) Chanking -----
+    # md_loaded = single_docling()
     # docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(
     #     mineru_result=md_loaded
     # )
 
-    # # ----- 8) Deferrable sensor - async wait for each batch (frees workers) -----
     # docling_wait = DoclingBatchStatusSensor.partial(
     #     task_id="wait_docling_batch",
     #     docling_conn_id="docling",
-    #     poll_interval=30,
+    #     poll_interval=10,
     # ).expand(external_task_ids=docling_task_ids)
-
-    # # ----- 6) Upload .jsom to MinIO per batch -----
     # docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
-    # # ----- 8) Qdrant  -----
-    # save_to_qdrant.expand(docling_json_paths=docling_chunks)
+    # create_qdrant_collection() >> save_to_qdrant.expand(docling_json_paths=docling_chunks)
+    # ------------------------------------------------------------
+    # ----- 1) Discovery -----
+    get_buckets_data()
+    mineru_health = check_mineru_health()
+    qdrant_health = create_qdrant_collection()
+    files_task = list_files_to_process(bucket=RAG_DATA_BUCKET)
+    # ----- 2) Split into batches of BATCH_SIZE -----
+    file_batches = create_file_batches(files_task)
+    # [["f1","f2",...,"f8"], ["f9","f10",...], ...]
+
+    # ----- 3) Submit each batch to MinerU (one dynamic task per batch) -----
+    mineru_task_ids = batch_mineru_submit.partial(
+        bucket_name=RAG_DATA_BUCKET,
+        health_status=mineru_health,
+        qerant_status=qdrant_health,
+    ).expand(file_keys=file_batches)
+    # [["tid1","tid2",...], ["tid9",...], ...]
+
+    # ----- 4) Deferrable sensor - async wait for each batch (frees workers) -----
+    mineru_wait = MineruBatchStatusSensor.partial(
+        task_id="wait_mineru_batch",
+        mineru_conn_id="mineru",
+        poll_interval=60,
+    ).expand(external_task_ids=mineru_task_ids)
+    # output: [["tid1","tid2",...], ["tid9",...], ...]
+
+    # ----- 5) Save .md files per batch -----
+    md_files = save_mineru_results.expand(mineru_task_ids=mineru_wait.output)
+
+    # ----- 6) Upload .md to MinIO per batch -----
+    md_loaded = load_md_to_minio.expand(mineru_result=md_files)
+
+    # ----- 7) Chanking -----
+    docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(
+        mineru_result=md_loaded
+    )
+
+    # ----- 8) Deferrable sensor - async wait for each batch (frees workers) -----
+    docling_wait = DoclingBatchStatusSensor.partial(
+        task_id="wait_docling_batch",
+        docling_conn_id="docling",
+        poll_interval=30,
+    ).expand(external_task_ids=docling_task_ids)
+
+    # ----- 6) Upload .jsom to MinIO per batch -----
+    docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
+    # ----- 8) Qdrant  -----
+    save_to_qdrant.expand(docling_json_paths=docling_chunks)
 
 
 batch_pipeline()

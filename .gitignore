@@ -8,3 +8,7 @@ output
 client-postgres-init/
 __pycache__
 airflow/logs
+QWEN.md
+.qwen
+.zed
+.pytest_cache
