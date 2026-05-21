@@ -1,72 +1,165 @@
-# Система поиска по нормативно-техническим документам (СП, СНиП, ГОСТ)
+# Локальная система поиска по нормативно-техническим документам (СП, СНиП, ГОСТ)
 
-Первая полностью рабочая версия системы. 
+Первая рабочая версия.
 
 ---
-# Обновленнеая архитектура
+
+## Архитектура
+
 ### Data Pipeline — Airflow DAG `batch_pipline`
 
-| Изменение | Детали |
+| Компонент | Детали |
 |-----------|--------|
-| Оркестрация |  Airflow 3.2|
+| Оркестрация | Airflow 3.2 |
 | Цепочка обработки | MinIO (PDF) → MinerU (OCR) → Docling (chunking) → Qdrant |
 | MinerU | Распознавание текста, формул и таблиц из PDF |
 | Docling | Иерархические Markdown-чанки |
-| Обогащение чанков | Извлечение ссылок на нормативы (СП/СНиП/ГОСТ), таблиц |
+| Обогащение | Извлечение ссылок на нормативы (СП/СНиП/ГОСТ), таблиц |
 | Векторизация | `BAAI/bge-m3`: dense (1024d) + sparse (BM25) + ColBERT |
 
-> Основная идея деление на чанки - иерархический чанкинг с пловающим окном работа с избыточностью. [Подробдее](https://medium.com/@hariprasannaa2001/chunking-for-rag-sliding-windows-structure-aware-splits-and-what-actually-works-dfdafcc79c9a)
+> Иерархический чанкинг с плавающим окном для работы с избыточностью.
+
 ### Retriever Service — Streamlit + Qdrant
 
-| Изменение | Детали |
-|-----------|--------|
+| Параметр | Описание |
+|----------|----------|
 | Гибридный поиск | dense + sparse → ColBERT rerank |
-| Режимы поиска | `hybrid`, `dense`, `sparse` |
-| Параметр `top_k` | Количество финальных результатов |
-| Параметр `prefetch_k` | Кандидаты для ColBERT rerank (default: `top_k × 4`) |
-| Параметр `only_tables` | Фильтрация только по чанкам-таблицам |
-| Параметр `use_rewriter` | Перефразирование запроса через LLM перед поиском |
-> Основным методом поиска является `hybrid`. `dense` и `sparse` планируется использовать, если будет искатья конкретное определение по конкретной норме.
+| Режимы | `hybrid`, `dense`, `sparse` |
+| `top_k` | Количество финальных результатов |
+| `prefetch_k` | Кандидаты для ColBERT rerank (default: `top_k × 4`) |
+| `only_tables` | Фильтр только по чанкам-таблицам |
+| `use_rewriter` | Переформулирование запроса через LLM |
+
+> Основной метод поиска — `hybrid`.
+
 ### LLM Service — `vllm-light`
 
-| Изменение | Детали |
-|-----------|--------|
+| Параметр | Значение |
+|----------|----------|
 | Модель | `Qwen/Qwen3-4B` |
 | Роль | Query rewriter + Answer composer |
 | Endpoint | `localhost:8020` |
 
 ### Инфраструктура
 
-| Изменение | Детали |
-|-----------|--------|
-| Оркестрация | Docker Compose: Airflow 3.2, MinIO, Qdrant, Docling Serve, vllm-light, Streamlit |
-| GPU | CUDAExecutionProvider для ONNX/FlagEmbedding |
-| Конфигурация | Все параметры вынесены в `.env` |
+Docker Compose: Airflow 3.2, MinIO, Qdrant, Docling Serve, vllm-light. GPU: CUDAExecutionProvider.
 
 ---
-# Планируемы улучшения:
-- [ ] Первая вресия дизайн документа
 
-## Улучшения Retriever Service
-- [ ] Сделать сиситему логирования запроса и ответа с метаданными
-- [ ] Нужно определиться с метрикой качества. Сейчас используется взвешенная сумма, как исходный вариант Qdrant, но метрика не подойдет для AБ тестов, так как порой и редевантный ответ по данный метрике не пройдет. Как пример вопрос "величина перевязки блоков крупноформатных"
-- [ ] развести app_v2.py на отдельные молуди, сейчас все в одном файле.
-- [ ] Потестить размеры контекста доступные мне на RTX3060 c 12Gb VRAM
-- [ ] Потестировать систему не перевразирования запроса а декомпозицию на подзапросы
-- [ ] В дополнение к тестам сделать A/B тесты что бы смочь проверять вляение изменений на качество ответов
-- [ ] Протестировать как система ведет себя в случае отсутствия ответа в базе 
-- [ ] Сделать FastAPI сервис для поиска и формирования ответа
-- [ ] Отладить филтрацию. Сейчас работает только если полностью указать имя файла
-- [ ] Передавать изобрадения нойденые в Payload в контекст ответа
-- [ ] Было сразу замечено, что модель при формировании ответа "0.4 длины блока" восприняла 0.4 как футы 
+## Установка и запуск
 
-## Улучшения Data Pipeline
+### 1. Подготовка системы (первичный запуск)
+
+```bash
+sudo bash scripts/setup-linux.sh
+```
+
+Устанавливает Docker, NVIDIA Container Toolkit, CUDA 12.9, Python и создает структуру `data/`.
+
+### 2. Установка репозитория 
+```bash
+git clone https://github.com/dvedd/EngineeringRAG
+cd EngineeringRAG
+```
+### 3. Настройка окружения
+
+```bash
+# Создать виртуальное окружение
+python -m venv venv
+
+# Активировать окружение
+source venv/bin/activate
+
+# Установить зависимости
+pip install -r requirements.txt
+```
+
+Создать `.env` файл с необходимыми секретами (сгенерировать можно самостоятельно):
+
+```env
+# Airflow
+AIRFLOW_UID=1000
+AIRFLOW__CORE__EXECUTOR=CeleryExecutor
+AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+
+# Secrets
+AIRFLOW__API__SECRET_KEY=<your-secret-key>
+AIRFLOW__CORE__FERNET_KEY=<your-fernet-key>
+AIRFLOW__API_AUTH__JWT_SECRET=<your-jwt-secret>
+
+# Database
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
+AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+
+# MinIO
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin
+
+# Superset
+SUPERSET_SECRET_KEY=<your-superset-secret>
+
+# Warehouse PostgreSQL
+WAREHOUSE_PG_USER=postgres
+WAREHOUSE_PG_PASSWORD=postgres
+WAREHOUSE_PG_DB=warehouse
+
+# Client PostgreSQL
+CLIENT_PG_USER=postgres
+CLIENT_PG_PASSWORD=postgres
+CLIENT_PG_DB=postgres
+
+# PGAdmin
+PGADMIN_DEFAULT_EMAIL=admin@admin.com
+PGADMIN_DEFAULT_PASSWORD=admin
+```
+
+### 4. Запуск компонентов
+
+```bash
+docker compose up -d
+```
+
+Сервисы:
+- Airflow UI: `http://localhost:8080` (admin:admin)
+- MinIO: `http://localhost:9000` (minioadmin:minioadmin)
+- MinIO Console: `http://localhost:9001`
+- Qdrant: `http://localhost:6333`
+- vllm-light: `http://localhost:8020`
+- Docling: `http://localhost:5001`
+
+### 5. Запуск UI сервиса
+
+```bash
+cd retriever_service
+streamlit run app_v2.py
+```
+
+Адрес сервиса: http://localhost:8501
+
+---
+
+## Планируемые улучшения:
+
+### Retriever Service
+- [ ] Система логирования запроса и ответа с метаданными
+- [ ] Метрика качества для A/B тестов
+- [ ] Разделение app_v2.py на модули
+- [ ] Тестирование размеров контекста (RTX3060, 12GB VRAM)
+- [ ] Декомпозиция запросов вместо переформулирования
+- [ ] A/B тесты для проверки изменений
+- [ ] Поведение при отсутствии ответа в базе
+- [ ] FastAPI сервис для поиска
+- [ ] Отладка фильтрации по имени файла
+- [ ] Передача изображений из Payload в контекст
+
+### Data Pipeline
 - [ ] Metadata database для отслеживания файлов в MinIO (PostgreSQL)
-- [ ] Перенастроить Mineru на хранение методанных в Redis, так как наблюдается поретя данных в случае OOM Killer сработает
-- [ ] Добавление терминологического словаря по домену строительных норм
-- [ ] Автоматическое обновление вектороной базы при изменении документов в MinIO (S3 event -> trigger DAG)
-- [ ] Очистка памити системы - Mineru оставляет держит в памяти модели и нет поинта для очистки -> скорее всего потребуется отдельный сервис с доинтами для обработки и очистки памяти
-- [ ] Разгрузить метод save_docling_results
-- [ ] Оптимизация docker images.
-- [ ] Вынести Qdrant в отдельный сервис что бы облечить образ Airflow.
-- [ ] Mineru способен сохранять изображения => нужно их сохранять в MinIO(по GUID) и записывать в Payload
+- [ ] Переход MinerU на Redis (проблема OOM Killer)
+- [ ] Терминологический словарь по строительным нормам
+- [ ] Автоматическое обновление векторной БД при изменении документов в MinIO
+- [ ] Очистка памяти системы (MinerU держит модели в VRAM)
+- [ ] Разгрузка save_docling_results
+- [ ] Оптимизация docker images
+- [ ] Вынос Qdrant в отдельный сервис
+- [ ] Сохранение изображений из MinerU в MinIO и запись в Payload
