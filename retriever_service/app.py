@@ -1,10 +1,14 @@
-import os
-import warnings
+# import os
+# import warnings
 
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+# os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+# warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 
+import json
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import streamlit as st
@@ -37,7 +41,65 @@ class LLMData:
 
     ANSTER_BASE_URL = REWRITER_BASE_URL
     ANSTER_MODEL = REWRITER_MODEL
-    ANSWER_CONTEXT_LIMIT = 3
+    ANSWER_CONTEXT_LIMIT = 6
+
+
+class QueryLogger:
+    def __init__(
+        self, log_path: str | Path = "retriever_service/logs/user_queries_logs.json"
+    ) -> None:
+        self._path = Path(log_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _load(self) -> dict:
+        if self._path.exists():
+            try:
+                return json.loads(self._path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                log.warning("query_log_corrupted", path=str(self._path))
+        return {}
+
+    def log(
+        self,
+        query: str,
+        effective_query: str,
+        was_rewritten: bool,
+        mode: str,
+        top_k: int,
+        results: list[RetrievalResult],
+        user_answer_md: str | None,
+    ) -> None:
+        data = self._load()
+        data[f"{query}_{uuid.uuid4()}"] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "effective_query": effective_query,
+            "was_rewritten": was_rewritten,
+            "mode": mode,
+            "top_k": top_k,
+            "answer": user_answer_md,
+            "chunks": [
+                {
+                    "rank": idx,
+                    "score": result.score,
+                    "filename": result.filename,
+                    "chunk_index": result.chunk_index,
+                    "section_path": result.section_path,
+                    "headings": result.headings,
+                    "is_table": result.is_table,
+                    "man_refs": result.man_refs,
+                    "cross_refs": result.cross_refs,
+                    "text": result.text.strip(),
+                }
+                for idx, result in enumerate(results, start=1)
+            ],
+        }
+        try:
+            self._path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            log.error("query_logger_error", error=str(e))
 
 
 class QueryRewriter:
@@ -55,11 +117,13 @@ class QueryRewriter:
     - Верни ТОЛЬКО переформулированный запрос, без пояснений и кавычек.
     - Убери разговорные обороты («расскажи мне», «хочу узнать» и т.п.).
     - Сохрани все технические термины, номера стандартов, классы материалов.
-    - Добавь релевантные синонимы и уточнения области применения, если очевидны.
+    - Добавь релевантные синонимы которые могут улучшить векторный поиск.
+    - Если в ответе есть номры их не трогай, если нет, но добовлять нормы запрещено.
     - Длина ответа — не более двух предложений.
     """
+    # - Если мало контекста для поиска то добавь несколько ключивых слов которые отсутствуют в вопросе. Но не бельше чем 2 слова.
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(self, timeout: float = 120.0) -> None:
         self.client = OpenAI(
             base_url=LLMData.REWRITER_BASE_URL,
             api_key="",
@@ -100,19 +164,37 @@ class AnswerComposer:
     - Форматируй ответ в Markdown.
     - Пиши на русском языке.
     - Используй структуру:
-      1. Короткий вывод в 1-3 предложениях.
+      1. Короткий но развернутый вывод в 1-3 предложениях максимально по контексту.
       2. Раздел "Что удалось найти" со списком.
       3. Раздел "Ограничения" только если это действительно нужно.
       4. Раздел "Основание" с коротким списком использованных документов/разделов.
     - Не показывай служебные поля вроде score, chunk_index, id.
     - Не пиши, что ты модель или ИИ.
+
+    Шаблон формирования ответа?
+    #### Ответ
+    <1–3 предложения: прямой ответ>
+
+    #### Что удалось найти
+    - факт 1 (п. X.X.X)
+    - факт 2
+    - ...
+
+    #### Основание
+    | Документ | Раздел |
+    |---|---|
+    | СП 63.13330.2018 | 10.3 Армирование |
+
+
+    #### Ограничения        ← только если есть оговорки
+    > текст оговорки
     """
 
-    def __init__(self, timeout: float = 45.0) -> None:
+    def __init__(self, timeout: float = 1200) -> None:
         self.client = OpenAI(
             base_url=LLMData.ANSTER_BASE_URL,
             api_key="",
-            # timeout=timeout,
+            timeout=timeout,
         )
         self.model = LLMData.ANSTER_MODEL
 
@@ -305,12 +387,21 @@ class SearchRunner:
         self._retriever = retriever
         self._rewriter = QueryRewriter()
         self._answer_composer = AnswerComposer()
+        self._logger = QueryLogger()
 
     def run(self, query: str, params: SidebarParams) -> None:
         effective_query, rewritten = self._maybe_rewrite(query, params)
         results = self._fetch_results(effective_query, params)
         user_answer_md = self._build_user_answer(query, effective_query, results, params)
-        self._validate_and_store(results, query, effective_query, params, rewritten, user_answer_md)
+        self._validate_and_store(
+            results,
+            query,
+            effective_query,
+            params,
+            rewritten,
+            user_answer_md,
+            self._logger,
+        )
 
     def _maybe_rewrite(self, query: str, params: SidebarParams) -> tuple[str, bool]:
         if not params.use_rewriter:
@@ -360,9 +451,21 @@ class SearchRunner:
         params: SidebarParams,
         rewritten: bool,
         user_answer_md: str | None,
+        logger: "QueryLogger",
     ) -> None:
-        if results:
-            st.caption(f"Лучший скор: {results[0].score:.4f} (порог: {SCORE_THRESHOLD})")
+        # --- logs ---
+        logger.log(
+            query=original_query,
+            effective_query=effective_query,
+            was_rewritten=rewritten,
+            mode=params.mode,
+            top_k=params.top_k,
+            results=results,
+            user_answer_md=user_answer_md,
+        )
+
+        # if results:
+        #     st.caption(f"Лучший скор: {results[0].score:.4f} (порог: {SCORE_THRESHOLD})")
 
         st.session_state["results"] = results
         st.session_state["user_answer_md"] = user_answer_md
@@ -392,8 +495,8 @@ class ResultsView:
         meta: dict = st.session_state.get("meta", {})
         user_answer_md: str | None = st.session_state.get("user_answer_md")
 
-        st.divider()
-        self._render_metrics(results, meta)
+        # st.divider()
+        # self._render_metrics(results, meta)
 
         tab_user, tab_dev = st.tabs(["Ответ", "Отладка"])
 
@@ -409,7 +512,7 @@ class ResultsView:
         meta: dict,
         user_answer_md: str | None,
     ) -> None:
-        st.markdown("#### Ответ для пользователя")
+        # st.markdown("#### Ответ для пользователя")
         if user_answer_md:
             st.markdown(user_answer_md)
         elif not meta.get("generate_user_answer", True):
@@ -426,6 +529,8 @@ class ResultsView:
 
     def _render_dev_tab(self, results: list[RetrievalResult], meta: dict) -> None:
         st.markdown("#### Отладочное представление")
+        st.divider()
+        self._render_metrics(results, meta)
         if meta.get("was_rewritten"):
             st.markdown(
                 f"**Исходный запрос:** {meta.get('query', '')}\n\n"

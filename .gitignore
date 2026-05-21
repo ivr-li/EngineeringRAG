@@ -12,3 +12,4 @@ QWEN.md
 .qwen
 .zed
 .pytest_cache
+retriever_service/logs
