@@ -1,13 +1,12 @@
-apache-airflow-task-sdk
-apache-airflow-providers-amazon
-apache-airflow-providers-qdrant
+# Core
+uvicorn==0.44.0
+pydantic==2.13.2
+pydantic-extra-types==2.11.1
+pydantic-settings==2.14.0
+python-dotenv==1.2.2
+requests==2.33.1
+FlagEmbedding==1.4.0
 
-#Core
-uvicorn[standard]
-pydantic
-python-dotenv
-requests
-FlagEmbedding
 # LangChain
 langchain
 langchain-openai
@@ -15,10 +14,18 @@ langchain-community
 langchain-qdrant
 
 # Vector DB
-qdrant-client
-sentence_transformers
-fastembed
+qdrant-client==1.17.1
+sentence-transformers==5.4.1
+fastembed==0.8.0
+fastembed-gpu==0.8.0
+
 # Utilities
-pyyaml
-click
-httpx
+pyyaml==6.0.3
+click==8.3.2
+httpx==0.28.1
+structlog==25.5.0
+
+# Airflow Core
+apache-airflow==3.2.0
+apache-airflow-providers-amazon==9.25.0
+apache-airflow-providers-qdrant==1.5.5

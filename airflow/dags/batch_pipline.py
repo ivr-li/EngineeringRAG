@@ -1,27 +1,3 @@
-"""
-Batch Document Ingestion Pipeline
-==================================
-End-to-end pipeline that discovers PDF files in MinIO, converts them to
-Markdown via MinerU (OCR), chunks the Markdown hierarchically via Docling,
-and upserts dense / sparse / ColBERT vectors into a Qdrant collection.
-
-Pipeline stages
----------------
-1. **Discovery** – list buckets, filter supported formats, skip already-processed files.
-2. **Batching** – split file keys into fixed-size batches for parallel processing.
-3. **MinerU OCR** – submit batches, wait (deferrable sensor), retrieve ``.md`` results.
-4. **MinIO upload** – persist ``.md`` files under ``dev_data/mineru_md/``.
-5. **Docling chunking** – hierarchical Markdown chunking via async Docling API.
-6. **Enrichment** – extract normative references, tag tables, clean OCR artefacts.
-7. **Qdrant upsert** – encode with dense / sparse / ColBERT models and upsert points.
-
-Connections required
---------------------
-minio, mineru, docling
-"""
-
-from __future__ import annotations
-
 import json
 import logging
 import uuid
@@ -920,66 +896,66 @@ def batch_pipeline():
     # Graph
     # ==========================================================
     # ----- 0) Docling single precess -----
-    md_loaded = single_docling()
-    docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(
-        mineru_result=md_loaded
-    )
-
-    docling_wait = DoclingBatchStatusSensor.partial(
-        task_id="wait_docling_batch",
-        docling_conn_id="docling",
-        poll_interval=10,
-    ).expand(external_task_ids=docling_task_ids)
-    docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
-    create_qdrant_collection() >> save_to_qdrant.expand(docling_json_paths=docling_chunks)
-    # ------------------------------------------------------------
-    # ----- 1) Discovery -----
-    # get_buckets_data()
-    # mineru_health = check_mineru_health()
-    # qdrant_health = create_qdrant_collection()
-    # files_task = list_files_to_process(bucket=RAG_DATA_BUCKET)
-    # # ----- 2) Split into batches of BATCH_SIZE -----
-    # file_batches = create_file_batches(files_task)
-    # # [["f1","f2",...,"f8"], ["f9","f10",...], ...]
-
-    # # ----- 3) Submit each batch to MinerU (one dynamic task per batch) -----
-    # mineru_task_ids = batch_mineru_submit.partial(
-    #     bucket_name=RAG_DATA_BUCKET,
-    #     health_status=mineru_health,
-    #     qerant_status=qdrant_health,
-    # ).expand(file_keys=file_batches)
-    # # [["tid1","tid2",...], ["tid9",...], ...]
-
-    # # ----- 4) Deferrable sensor - async wait for each batch (frees workers) -----
-    # mineru_wait = MineruBatchStatusSensor.partial(
-    #     task_id="wait_mineru_batch",
-    #     mineru_conn_id="mineru",
-    #     poll_interval=60,
-    # ).expand(external_task_ids=mineru_task_ids)
-    # # output: [["tid1","tid2",...], ["tid9",...], ...]
-
-    # # ----- 5) Save .md files per batch -----
-    # md_files = save_mineru_results.expand(mineru_task_ids=mineru_wait.output)
-
-    # # ----- 6) Upload .md to MinIO per batch -----
-    # md_loaded = load_md_to_minio.expand(mineru_result=md_files)
-
-    # # ----- 7) Chanking -----
+    # md_loaded = single_docling()
     # docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(
     #     mineru_result=md_loaded
     # )
 
-    # # ----- 8) Deferrable sensor - async wait for each batch (frees workers) -----
     # docling_wait = DoclingBatchStatusSensor.partial(
     #     task_id="wait_docling_batch",
     #     docling_conn_id="docling",
-    #     poll_interval=30,
+    #     poll_interval=10,
     # ).expand(external_task_ids=docling_task_ids)
-
-    # # ----- 6) Upload .jsom to MinIO per batch -----
     # docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
-    # # ----- 8) Qdrant  -----
-    # save_to_qdrant.expand(docling_json_paths=docling_chunks)
+    # create_qdrant_collection() >> save_to_qdrant.expand(docling_json_paths=docling_chunks)
+    # ------------------------------------------------------------
+    # ----- 1) Discovery -----
+    get_buckets_data()
+    mineru_health = check_mineru_health()
+    qdrant_health = create_qdrant_collection()
+    files_task = list_files_to_process(bucket=RAG_DATA_BUCKET)
+    # ----- 2) Split into batches of BATCH_SIZE -----
+    file_batches = create_file_batches(files_task)
+    # [["f1","f2",...,"f8"], ["f9","f10",...], ...]
+
+    # ----- 3) Submit each batch to MinerU (one dynamic task per batch) -----
+    mineru_task_ids = batch_mineru_submit.partial(
+        bucket_name=RAG_DATA_BUCKET,
+        health_status=mineru_health,
+        qerant_status=qdrant_health,
+    ).expand(file_keys=file_batches)
+    # [["tid1","tid2",...], ["tid9",...], ...]
+
+    # ----- 4) Deferrable sensor - async wait for each batch (frees workers) -----
+    mineru_wait = MineruBatchStatusSensor.partial(
+        task_id="wait_mineru_batch",
+        mineru_conn_id="mineru",
+        poll_interval=60,
+    ).expand(external_task_ids=mineru_task_ids)
+    # output: [["tid1","tid2",...], ["tid9",...], ...]
+
+    # ----- 5) Save .md files per batch -----
+    md_files = save_mineru_results.expand(mineru_task_ids=mineru_wait.output)
+
+    # ----- 6) Upload .md to MinIO per batch -----
+    md_loaded = load_md_to_minio.expand(mineru_result=md_files)
+
+    # ----- 7) Chanking -----
+    docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(
+        mineru_result=md_loaded
+    )
+
+    # ----- 8) Deferrable sensor - async wait for each batch (frees workers) -----
+    docling_wait = DoclingBatchStatusSensor.partial(
+        task_id="wait_docling_batch",
+        docling_conn_id="docling",
+        poll_interval=30,
+    ).expand(external_task_ids=docling_task_ids)
+
+    # ----- 6) Upload .jsom to MinIO per batch -----
+    docling_chunks = save_docling_results.expand(docling_task_ids=docling_wait.output)
+    # ----- 8) Qdrant  -----
+    save_to_qdrant.expand(docling_json_paths=docling_chunks)
 
 
 batch_pipeline()

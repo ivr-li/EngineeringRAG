@@ -195,7 +195,6 @@ QDRANT_UPSERT_BATCH = 32    # точек за один upsert запрос
 
 - **MinerU pipeline** не освобождает VRAM между задачами. Ограничение через `MINERU_VIRTUAL_VRAM_SIZE`. Для полной очистки требуется `docker compose stop && rm && up`.
 - **Qdrant upsert timeout** при больших ColBERT матрицах — решается `QDRANT_UPSERT_BATCH=32` и `timeout=120` на клиенте.
-- **Graф связей между нормами** не реализован — ссылки извлекаются в `refs` payload, но граф обхода отсутствует.
 - **Терминологический словарь** (`TERM_NORMALIZATION`) применяется только на стороне запроса, не покрывает все расхождения.
 
 ---

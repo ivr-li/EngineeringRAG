@@ -24,6 +24,15 @@ def _score_dot(score: float, mode: SearchMode) -> str:
     return "🟢" if score >= 0.02 else ("🟡" if score >= 0.01 else "🔴")
 
 
+class LLMData:
+    REWRITER_BASE_URL = "http://localhost:8020/v1"
+    REWRITER_MODEL = "query-rewriter"
+
+    ANSTER_BASE_URL = REWRITER_BASE_URL
+    ANSTER_MODEL = REWRITER_MODEL
+    ANSWER_CONTEXT_LIMIT = 3
+
+
 class QueryRewriter:
     """
     Переформулирует запрос через vllm-light.
@@ -42,12 +51,10 @@ class QueryRewriter:
     - Добавь релевантные синонимы и уточнения области применения, если очевидны.
     - Длина ответа — не более двух предложений.
     """
-    REWRITER_BASE_URL = "http://localhost:8020/v1"
-    REWRITER_MODEL = "query-rewriter"
 
     def __init__(self, timeout: float = 30.0) -> None:
         self.client = OpenAI(
-            base_url=self.REWRITER_BASE_URL,
+            base_url=LLMData.REWRITER_BASE_URL,
             api_key="",
             timeout=timeout,
         )
@@ -55,7 +62,7 @@ class QueryRewriter:
     def rewrite(self, query: str) -> tuple[str, bool]:
         try:
             resp = self.client.chat.completions.create(
-                model=self.REWRITER_MODEL,
+                model=LLMData.REWRITER_MODEL,
                 messages=[
                     {"role": "system", "content": self.REWRITE_SYSTEM_PROMPT},
                     {"role": "user", "content": query},
@@ -70,6 +77,114 @@ class QueryRewriter:
         except Exception as e:
             log.error("rewriter_error", query=query, error=str(e))
             return query, False
+
+
+class AnswerComposer:
+    """Генерирует пользовательский markdown-ответ по найденным чанкам."""
+
+    ANSWER_SYSTEM_PROMPT = """
+    Ты — ассистент по нормативной документации в строительстве.
+    Твоя задача: на основе найденных фрагментов подготовить понятный ответ для пользователя.
+
+    Правила:
+    - Отвечай только по переданному контексту.
+    - Ничего не выдумывай и не добавляй от себя.
+    - Если данных недостаточно или они противоречивы, прямо скажи об этом.
+    - Форматируй ответ в Markdown.
+    - Пиши на русском языке.
+    - Используй структуру:
+      1. Короткий вывод в 1-3 предложениях.
+      2. Раздел "Что удалось найти" со списком.
+      3. Раздел "Ограничения" только если это действительно нужно.
+      4. Раздел "Основание" с коротким списком использованных документов/разделов.
+    - Не показывай служебные поля вроде score, chunk_index, id.
+    - Не пиши, что ты модель или ИИ.
+    """
+
+    def __init__(self, timeout: float = 45.0) -> None:
+        self.client = OpenAI(
+            base_url=LLMData.ANSTER_BASE_URL,
+            api_key="",
+            timeout=timeout,
+        )
+        self.model = LLMData.ANSTER_MODEL
+
+    def compose(self, query: str, effective_query: str, results: list[RetrievalResult]) -> str:
+        if not results:
+            return (
+                "## Ответ\n\n"
+                "По этому запросу ничего не найдено в базе.\n\n"
+                "Попробуйте уточнить формулировку, номер документа или нужный раздел."
+            )
+
+        context = self._build_context(results)
+        user_prompt = (
+            f"Исходный запрос пользователя:\n{query}\n\n"
+            f"Поисковый запрос после переформулирования:\n{effective_query}\n\n"
+            f"Контекст из ретривера:\n{context}"
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.ANSWER_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.15,
+                max_tokens=900,
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            return answer or self._fallback_answer(results)
+        except Exception as e:
+            log.error("answer_composer_error", query=query, error=str(e))
+            return self._fallback_answer(results)
+
+    def _build_context(self, results: list[RetrievalResult]) -> str:
+        parts: list[str] = []
+        for idx, result in enumerate(results[: LLMData.ANSWER_CONTEXT_LIMIT], start=1):
+            headings = " > ".join(result.headings or []) or "—"
+            section_path = result.section_path or "—"
+            refs = ", ".join(result.man_refs or result.cross_refs or []) or "—"
+            parts.append(
+                "\n".join(
+                    [
+                        f"Фрагмент {idx}",
+                        f"Документ: {result.filename}",
+                        f"Раздел: {section_path}",
+                        f"Заголовки: {headings}",
+                        f"Тип: {'таблица' if result.is_table else 'текст'}",
+                        f"Ссылки: {refs}",
+                        "Текст:",
+                        result.text.strip(),
+                    ]
+                )
+            )
+        return "\n\n---\n\n".join(parts)
+
+    def _fallback_answer(self, results: list[RetrievalResult]) -> str:
+        bullets: list[str] = []
+        basis: list[str] = []
+        for result in results[:3]:
+            snippet = " ".join(result.text.strip().split())[:280]
+            if snippet:
+                bullets.append(f"- {snippet}...")
+            label = result.filename
+            if result.section_path:
+                label += f", раздел {result.section_path}"
+            basis.append(f"- {label}")
+
+        answer_parts = [
+            "## Ответ:\n",
+            "\tНе удалось сформировать полноценный ответ через модель, поэтому ниже показана краткая сводка по найденным фрагментам.",
+            "## Что удалось найти\n",
+            *(
+                bullets
+                or ["- В релевантных фрагментах нет достаточного объёма данных для краткой сводки."]
+            ),
+            "## Основание",
+            *(basis or ["- Подходящие фрагменты не найдены."]),
+        ]
+        return "\n".join(answer_parts)
 
 
 class SidebarParams:
@@ -99,9 +214,13 @@ class SidebarParams:
             self.use_rewriter: bool = st.toggle(
                 "Переформулировать запрос",
                 value=True,
-                help="Использует vllm-light для преобразования вопроса в поисковый запрос.",
+                help="Использует vllm-light для преобразования вопроса в поисковый запрос",
             )
-
+            self.generate_user_answer: bool = st.toggle(
+                "Генерировать ответ для пользователя",
+                value=True,
+                help="Использует ту же модель для подготовки ответа по найденным фрагментам",
+            )
             st.divider()
             st.caption(f"Коллекция: `{_load_retriever().collection}`\n\nBGE-M3 · BM25 · ColBERTv2")
 
@@ -132,7 +251,6 @@ class SidebarParams:
         filename_filter = (
             st.text_input("Фильтр по файлу (filename)", placeholder="sp_63_13330") or None
         )
-        # NEW: section filter
         section_filter = (
             st.text_input(
                 "Фильтр по разделу (section_path)",
@@ -179,17 +297,31 @@ class SearchRunner:
     def __init__(self, retriever: QdrantRetriever) -> None:
         self._retriever = retriever
         self._rewriter = QueryRewriter()
+        self._answer_composer = AnswerComposer()
 
     def run(self, query: str, params: SidebarParams) -> None:
         effective_query, rewritten = self._maybe_rewrite(query, params)
         results = self._fetch_results(effective_query, params)
-        self._validate_and_store(results, query, effective_query, params, rewritten)
+        user_answer_md = self._build_user_answer(query, effective_query, results, params)
+        self._validate_and_store(results, query, effective_query, params, rewritten, user_answer_md)
 
     def _maybe_rewrite(self, query: str, params: SidebarParams) -> tuple[str, bool]:
         if not params.use_rewriter:
             return query, False
         with st.spinner("Переформулирование запроса…"):
             return self._rewriter.rewrite(query)
+
+    def _build_user_answer(
+        self,
+        query: str,
+        effective_query: str,
+        results: list[RetrievalResult],
+        params: SidebarParams,
+    ) -> str | None:
+        if not params.generate_user_answer:
+            return None
+        with st.spinner("Формирование пользовательского ответа…"):
+            return self._answer_composer.compose(query, effective_query, results)
 
     @staticmethod
     def _show_rewrite_info(original: str, effective: str, was_rewritten: bool) -> None:
@@ -220,14 +352,13 @@ class SearchRunner:
         effective_query: str,
         params: SidebarParams,
         rewritten: bool,
+        user_answer_md: str | None,
     ) -> None:
-        # if not results or results[0].score < SCORE_THRESHOLD:
-        #     st.warning("Документ по этой теме отсутствует в базе")
         if results:
             st.caption(f"Лучший скор: {results[0].score:.4f} (порог: {SCORE_THRESHOLD})")
-        # st.stop()
 
         st.session_state["results"] = results
+        st.session_state["user_answer_md"] = user_answer_md
         st.session_state["meta"] = dict(
             query=original_query,
             effective_query=effective_query,
@@ -238,11 +369,12 @@ class SearchRunner:
             only_tables=params.only_tables,
             filename_filter=params.filename_filter,
             section_filter=params.section_filter,
+            generate_user_answer=params.generate_user_answer,
         )
 
 
 class ResultsView:
-    """Отображает метрики и список найденных чанков."""
+    """Отображает пользовательский ответ и отладочное представление результатов."""
 
     def render(self) -> None:
         if "results" not in st.session_state:
@@ -251,13 +383,42 @@ class ResultsView:
 
         results: list[RetrievalResult] = st.session_state["results"]
         meta: dict = st.session_state.get("meta", {})
+        user_answer_md: str | None = st.session_state.get("user_answer_md")
 
         st.divider()
         self._render_metrics(results, meta)
 
-        # label_query = meta.get("effective_query") or meta.get("query", "")
-        st.markdown("#### Результат:\n")
-        print(meta.get("effective_query", ""))
+        tab_user, tab_dev = st.tabs(["Ответ", "Отладка"])
+
+        with tab_user:
+            self._render_user_tab(results, meta, user_answer_md)
+
+        with tab_dev:
+            self._render_dev_tab(results, meta)
+
+    def _render_user_tab(
+        self,
+        results: list[RetrievalResult],
+        meta: dict,
+        user_answer_md: str | None,
+    ) -> None:
+        st.markdown("#### Ответ для пользователя")
+        if user_answer_md:
+            st.markdown(user_answer_md)
+        elif not meta.get("generate_user_answer", True):
+            st.info("Генерация пользовательского ответа отключена в боковой панели.")
+        elif not results:
+            st.info("Ничего не найдено.")
+        else:
+            st.warning(
+                "Пользовательский ответ пока недоступен, но найденные фрагменты доступны во вкладке «Отладка»."
+            )
+
+        if results and results[0].score < SCORE_THRESHOLD:
+            st.caption("Релевантность низкая: ответ стоит перепроверить по исходным фрагментам.")
+
+    def _render_dev_tab(self, results: list[RetrievalResult], meta: dict) -> None:
+        st.markdown("#### Отладочное представление")
         if meta.get("was_rewritten"):
             st.markdown(
                 f"**Исходный запрос:** {meta.get('query', '')}\n\n"
@@ -265,13 +426,13 @@ class ResultsView:
             )
         else:
             st.markdown(f"**Исходный запрос:** {meta.get('query', '')}")
-        # st.markdown(f"*Перефраз: *«{meta.get('effective_query
 
         if not results:
             st.info("Ничего не найдено.")
-        else:
-            for idx, result in enumerate(results, start=1):
-                self._render_chunk(idx, result, meta.get("mode", "hybrid"))
+            return
+
+        for idx, result in enumerate(results, start=1):
+            self._render_chunk(idx, result, meta.get("mode", "hybrid"))
 
     def _render_metrics(self, results: list[RetrievalResult], meta: dict) -> None:
         m1, m2, m3, m4, m5 = st.columns(5)
@@ -284,16 +445,10 @@ class ResultsView:
         m4.metric("Таблиц", sum(1 for r in results if r.is_table))
         m5.metric("Макс. score", f"{max((r.score for r in results), default=0):.4f}")
 
-    def _render_chunk(
-        self,
-        idx: int,
-        result: RetrievalResult,
-        mode: SearchMode,
-    ) -> None:
+    def _render_chunk(self, idx: int, result: RetrievalResult, mode: SearchMode) -> None:
         dot = _score_dot(result.score, mode)
         kind = "Таблица" if result.is_table else "Текст"
-
-        overlap_badge = "🔁" if result.is_overlap_window else ""
+        overlap_badge = " 🔁" if result.is_overlap_window else ""
         section_info = f" · `{result.section_path}`" if result.section_path else ""
 
         label = (
@@ -320,23 +475,17 @@ class ResultsView:
             st.markdown(result.text)
 
     def _render_refs(self, result: RetrievalResult) -> None:
-        # Нормативные ссылки (man_refs)
         if result.man_refs:
             badges_man = " ".join(
-                f'<span style="background:#1a6b4a;color:#fff;'
-                f'padding:2px 6px;border-radius:4px;font-size:0.75em">'
-                f"{ref}</span>"
+                f'<span style="background:#1a6b4a;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75em">{ref}</span>'
                 for ref in result.man_refs
             )
             st.markdown(f"**Нормативные:** {badges_man}", unsafe_allow_html=True)
 
-        refs = result.cross_refs
-        if refs:
+        if result.cross_refs:
             badges_cross = " ".join(
-                f'<span style="background:#1a3a6b;color:#fff;'
-                f'padding:2px 6px;border-radius:4px;font-size:0.75em">'
-                f"{ref}</span>"
-                for ref in refs
+                f'<span style="background:#1a3a6b;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75em">{ref}</span>'
+                for ref in result.cross_refs
             )
             st.markdown(f"**Ссылки:** {badges_cross}", unsafe_allow_html=True)
 
@@ -350,7 +499,6 @@ class ResultsView:
                     "chunk_index": result.chunk_index,
                     "is_table": result.is_table,
                     "headings": result.headings,
-                    # NEW
                     "section_path": result.section_path,
                     "section_level": result.section_level,
                     "parent_heading": result.parent_heading,
@@ -365,8 +513,8 @@ class ResultsView:
     @staticmethod
     def _render_empty_prompt() -> None:
         st.markdown(
-            "Введите запрос и нажмите **Найти**\n\n"
-            "hybrid (dense + sparse → ColBERT rerank) · dense · sparse"
+            "Введите запрос и нажмите **Найти**.\n\n"
+            "После поиска появятся две вкладки: **Ответ** для пользователя и **Отладка** для разработчика."
         )
 
 
