@@ -6,6 +6,7 @@
 
 
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -40,7 +41,7 @@ class LLMData:
 
     ANSTER_BASE_URL = REWRITER_BASE_URL
     ANSTER_MODEL = REWRITER_MODEL
-    ANSWER_CONTEXT_LIMIT = 3
+    ANSWER_CONTEXT_LIMIT = 6
 
 
 class QueryLogger:
@@ -69,7 +70,7 @@ class QueryLogger:
         user_answer_md: str | None,
     ) -> None:
         data = self._load()
-        data[query] = {
+        data[f"{query}_{uuid.uuid4()}"] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "effective_query": effective_query,
             "was_rewritten": was_rewritten,
@@ -116,10 +117,11 @@ class QueryRewriter:
     - Верни ТОЛЬКО переформулированный запрос, без пояснений и кавычек.
     - Убери разговорные обороты («расскажи мне», «хочу узнать» и т.п.).
     - Сохрани все технические термины, номера стандартов, классы материалов.
-    - Добавь релевантные синонимы и уточнения области применения, если очевидны.
+    - Добавь релевантные синонимы которые могут улучшить векторный поиск.
+    - Если в ответе есть номры их не трогай, если нет, но добовлять нормы запрещено.
     - Длина ответа — не более двух предложений.
-    - Если мало контекста для поиска то добавь несколько ключивых слов которые отсутствуют в вопросе. Но не бельше чем 2 слова.
     """
+    # - Если мало контекста для поиска то добавь несколько ключивых слов которые отсутствуют в вопросе. Но не бельше чем 2 слова.
 
     def __init__(self, timeout: float = 120.0) -> None:
         self.client = OpenAI(
@@ -162,15 +164,33 @@ class AnswerComposer:
     - Форматируй ответ в Markdown.
     - Пиши на русском языке.
     - Используй структуру:
-      1. Короткий вывод в 1-3 предложениях.
+      1. Короткий но развернутый вывод в 1-3 предложениях максимально по контексту.
       2. Раздел "Что удалось найти" со списком.
       3. Раздел "Ограничения" только если это действительно нужно.
       4. Раздел "Основание" с коротким списком использованных документов/разделов.
     - Не показывай служебные поля вроде score, chunk_index, id.
     - Не пиши, что ты модель или ИИ.
+
+    Шаблон формирования ответа?
+    #### Ответ
+    <1–3 предложения: прямой ответ>
+
+    #### Что удалось найти
+    - факт 1 (п. X.X.X)
+    - факт 2
+    - ...
+
+    #### Основание
+    | Документ | Раздел |
+    |---|---|
+    | СП 63.13330.2018 | 10.3 Армирование |
+
+
+    #### Ограничения        ← только если есть оговорки
+    > текст оговорки
     """
 
-    def __init__(self, timeout: float = 120) -> None:
+    def __init__(self, timeout: float = 1200) -> None:
         self.client = OpenAI(
             base_url=LLMData.ANSTER_BASE_URL,
             api_key="",
@@ -444,8 +464,8 @@ class SearchRunner:
             user_answer_md=user_answer_md,
         )
 
-        if results:
-            st.caption(f"Лучший скор: {results[0].score:.4f} (порог: {SCORE_THRESHOLD})")
+        # if results:
+        #     st.caption(f"Лучший скор: {results[0].score:.4f} (порог: {SCORE_THRESHOLD})")
 
         st.session_state["results"] = results
         st.session_state["user_answer_md"] = user_answer_md
@@ -475,8 +495,8 @@ class ResultsView:
         meta: dict = st.session_state.get("meta", {})
         user_answer_md: str | None = st.session_state.get("user_answer_md")
 
-        st.divider()
-        self._render_metrics(results, meta)
+        # st.divider()
+        # self._render_metrics(results, meta)
 
         tab_user, tab_dev = st.tabs(["Ответ", "Отладка"])
 
@@ -492,7 +512,7 @@ class ResultsView:
         meta: dict,
         user_answer_md: str | None,
     ) -> None:
-        st.markdown("#### Ответ для пользователя")
+        # st.markdown("#### Ответ для пользователя")
         if user_answer_md:
             st.markdown(user_answer_md)
         elif not meta.get("generate_user_answer", True):
@@ -509,6 +529,8 @@ class ResultsView:
 
     def _render_dev_tab(self, results: list[RetrievalResult], meta: dict) -> None:
         st.markdown("#### Отладочное представление")
+        st.divider()
+        self._render_metrics(results, meta)
         if meta.get("was_rewritten"):
             st.markdown(
                 f"**Исходный запрос:** {meta.get('query', '')}\n\n"
