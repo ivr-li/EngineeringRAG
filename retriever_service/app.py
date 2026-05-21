@@ -1,3 +1,10 @@
+import os
+import warnings
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+
+
 from typing import Literal
 
 import streamlit as st
@@ -105,7 +112,7 @@ class AnswerComposer:
         self.client = OpenAI(
             base_url=LLMData.ANSTER_BASE_URL,
             api_key="",
-            timeout=timeout,
+            # timeout=timeout,
         )
         self.model = LLMData.ANSTER_MODEL
 
