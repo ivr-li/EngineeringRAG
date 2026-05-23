@@ -66,9 +66,9 @@ services:
             - --served-model-name
             - query-rewriter
             - --gpu-memory-utilization
-            - "0.30"
-            - --max-model-len
-            - "4096"
+            - "0.50"
+            # - --max-model-len
+            # - "4096"
             - --max-num-seqs
             - "8"
             - --reasoning-parser
