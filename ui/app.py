@@ -5,7 +5,6 @@ from components import (
     SearchBar,
     SidebarParams,
 )
-from config import UIConfig
 
 
 def main() -> None:
