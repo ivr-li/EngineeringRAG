@@ -118,7 +118,7 @@ class QueryRewriter:
     - Убери разговорные обороты («расскажи мне», «хочу узнать» и т.п.).
     - Сохрани все технические термины, номера стандартов, классы материалов.
     - Добавь релевантные синонимы которые могут улучшить векторный поиск.
-    - Если в ответе есть номры их не трогай, если нет, но добовлять нормы запрещено.
+    - Запрощено приписывать нормы к запросу самостоятельно
     - Длина ответа — не более двух предложений.
     """
     # - Если мало контекста для поиска то добавь несколько ключивых слов которые отсутствуют в вопросе. Но не бельше чем 2 слова.
@@ -293,7 +293,7 @@ class SidebarParams:
                     "**sparse** — только BGE-M3 BM25 (ключевые слова)."
                 ),
             )
-            self.top_k: int = st.slider("top_k — финальных результатов", 1, 20, 10)
+            self.top_k: int = st.slider("top_k — финальных результатов", 1, 20, 4)
             self.prefetch_k: int = self._render_prefetch_k()
 
             st.divider()
@@ -316,11 +316,12 @@ class SidebarParams:
     def _render_prefetch_k(self) -> int:
         if self.mode != "hybrid":
             return self.top_k * 4
+            # return 30
         return st.slider(
             "prefetch_k — кандидатов для ColBERT rerank",
             min_value=self.top_k,
             max_value=100,
-            value=min(self.top_k * 4, 100),
+            value=min(40, 100),
             help="Кандидатов из dense+sparse перед rerank. Больше = точнее, медленнее.",
         )
 
