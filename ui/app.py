@@ -32,7 +32,7 @@ def main() -> None:
                 filename_filter=params.filename_filter,
                 section_filter=params.section_filter,
             )
-            print(response)
+            # print(response)
             st.session_state["search_response"] = response
             st.session_state["meta"] = dict(
                 query=search_bar.query,
