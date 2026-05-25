@@ -1,6 +1,18 @@
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+class LLMConfig:
+    REWRITER_BASE_URL = "http://localhost:8020/v1"
+    REWRITER_MODEL = "query-rewriter"
+
+    ANSTER_BASE_URL = REWRITER_BASE_URL
+    ANSTER_MODEL = REWRITER_MODEL
+    ANSWER_CONTEXT_LIMIT = 6
+    SearchMode = Literal["hybrid", "dense", "sparse"]
+    SCORE_THRESHOLD = 0.0
 
 
 class SearchRequest(BaseModel):
@@ -41,7 +53,7 @@ class RetrievalResult(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    results: list[RetrievalResult]
     answer: str | None = Field(None)
     effective_query: str = Field(...)
     was_rewritten: bool = Field(False)
+    results: list[RetrievalResult]

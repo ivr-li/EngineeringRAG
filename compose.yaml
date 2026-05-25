@@ -67,8 +67,8 @@ services:
             - query-rewriter
             - --gpu-memory-utilization
             - "0.50"
-            # - --max-model-len
-            # - "4096"
+            - --max-model-len
+            - "10000"
             - --max-num-seqs
             - "8"
             - --reasoning-parser

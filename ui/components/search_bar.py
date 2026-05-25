@@ -1,12 +1,11 @@
 import streamlit as st
+from config import UIConfig
 
-from ui.config import LLMData
-
-SearchMode = LLMData.SearchMode
+SearchMode = UIConfig.SearchMode
 
 
 class SearchBar:
-    """Поле ввода запроса и кнопки управления."""
+    """The query input field and control buttons"""
 
     def __init__(self) -> None:
         self.query: str = st.text_input(
@@ -16,7 +15,9 @@ class SearchBar:
         )
         col_search, col_clear, _ = st.columns([1, 1, 6])
         with col_search:
-            self.search_clicked = st.button("Найти", type="primary", use_container_width=True)
+            self.search_clicked = st.button(
+                "Найти", type="primary", use_container_width=True
+            )
         with col_clear:
             if st.button("Сбросить", use_container_width=True):
                 st.session_state.pop("results", None)

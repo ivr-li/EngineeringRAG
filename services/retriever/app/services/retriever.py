@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Literal
 
@@ -15,7 +14,8 @@ from qdrant_client.models import (
     Prefetch,
     SparseVector,
 )
-from schemas import RetrievalResult, SearchRequest
+
+from app.schemas import RetrievalResult
 
 QDRANT_URL = "http://localhost:6333"
 QDRANT_COLLECTION = "construction_docs"

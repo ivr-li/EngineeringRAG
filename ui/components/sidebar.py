@@ -1,24 +1,15 @@
 import streamlit as st
-
-from ui.components.results_view import ResultsView
-from ui.config import LLMData
-from ui.dataclasses import QdrantRetriever, RetrievalResult
-
-SearchMode = LLMData.SearchMode
-
-
-def _load_retriever() -> QdrantRetriever:
-    return QdrantRetriever()
+from config import UIConfig
 
 
 class SidebarParams:
-    """Считывает все параметры поиска из боковой панели."""
+    """All sidebar parameters"""
 
     def __init__(self) -> None:
         with st.sidebar:
             st.title("Параметры поиска")
 
-            self.mode: SearchMode = st.selectbox(
+            self.mode: UIConfig.SearchMode = st.selectbox(
                 "Режим поиска",
                 options=["hybrid", "dense", "sparse"],
                 index=0,
@@ -31,10 +22,12 @@ class SidebarParams:
             self.top_k: int = st.slider("top_k — финальных результатов", 1, 20, 4)
             self.prefetch_k: int = self._render_prefetch_k()
 
-            st.divider()
-            self.only_tables, self.filename_filter, self.section_filter = self._render_filters()
+            # st.divider()
+            self.only_tables, self.filename_filter, self.section_filter = (
+                self._render_filters()
+            )
 
-            st.divider()
+            # st.divider()
             self.use_rewriter: bool = st.toggle(
                 "Переформулировать запрос",
                 value=True,
@@ -45,8 +38,18 @@ class SidebarParams:
                 value=True,
                 help="Использует ту же модель для подготовки ответа по найденным фрагментам",
             )
-            st.divider()
-            st.caption(f"Коллекция: `{_load_retriever().collection}`\n\nBGE-M3 · BM25 · ColBERTv2")
+
+            # st.divider()
+            self.rewrite_system_prompt = st.text_area(
+                "Промт предобработки",
+                value=UIConfig.REWRITE_SYSTEM_PROMPT,
+                height=80,
+            )
+            self.compose_system_prompt = st.text_area(
+                "Промт ответа",
+                value=UIConfig.ANSWER_SYSTEM_PROMPT,
+                height=80,
+            )
 
     def _render_prefetch_k(self) -> int:
         if self.mode != "hybrid":

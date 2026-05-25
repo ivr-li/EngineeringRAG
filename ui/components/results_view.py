@@ -1,32 +1,29 @@
 import streamlit as st
+from config import RetrievalResult, UIConfig
 
-from ui.components.results_view import SearchMode
-from ui.config import LLMData
-from ui.dataclasses import RetrievalResult, SearchMode
-
-SCORE_THRESHOLD = LLMData.SCORE_THRESHOLD
+SCORE_THRESHOLD = 0
 
 
-def _score_dot(score: float, mode: SearchMode) -> str:
+def _score_dot(score: float, mode: UIConfig.SearchMode) -> str:
     if mode == "hybrid":
         return "🟢" if score >= 15 else ("🟡" if score >= 8 else "🔴")
     return "🟢" if score >= 0.02 else ("🟡" if score >= 0.01 else "🔴")
 
 
 class ResultsView:
-    """Отображает пользовательский ответ и отладочное представление результатов."""
+    """A user response and debug view of results"""
 
     def render(self) -> None:
-        if "results" not in st.session_state:
+        response = st.session_state.get("search_response", {})
+        if not response:
             self._render_empty_prompt()
             return
 
-        results: list[RetrievalResult] = st.session_state["results"]
+        results: list[RetrievalResult] = [
+            RetrievalResult(**r) for r in response.get("results", [])
+        ]
         meta: dict = st.session_state.get("meta", {})
-        user_answer_md: str | None = st.session_state.get("user_answer_md")
-
-        # st.divider()
-        # self._render_metrics(results, meta)
+        user_answer_md: str | None = response.get("answer")
 
         tab_user, tab_dev = st.tabs(["Ответ", "Отладка"])
 
@@ -55,12 +52,16 @@ class ResultsView:
             )
 
         if results and results[0].score < SCORE_THRESHOLD:
-            st.caption("Релевантность низкая: ответ стоит перепроверить по исходным фрагментам.")
+            st.caption(
+                "Релевантность низкая: ответ стоит перепроверить по исходным фрагментам."
+            )
 
     def _render_dev_tab(self, results: list[RetrievalResult], meta: dict) -> None:
         st.markdown("#### Отладочное представление")
         st.divider()
         self._render_metrics(results, meta)
+
+        # Show rewrite info from meta
         if meta.get("was_rewritten"):
             st.markdown(
                 f"**Исходный запрос:** {meta.get('query', '')}\n\n"
@@ -87,7 +88,9 @@ class ResultsView:
         m4.metric("Таблиц", sum(1 for r in results if r.is_table))
         m5.metric("Макс. score", f"{max((r.score for r in results), default=0):.4f}")
 
-    def _render_chunk(self, idx: int, result: RetrievalResult, mode: SearchMode) -> None:
+    def _render_chunk(
+        self, idx: int, result: RetrievalResult, mode: UIConfig.SearchMode
+    ) -> None:
         dot = _score_dot(result.score, mode)
         kind = "Таблица" if result.is_table else "Текст"
         overlap_badge = " 🔁" if result.is_overlap_window else ""
@@ -154,7 +157,4 @@ class ResultsView:
 
     @staticmethod
     def _render_empty_prompt() -> None:
-        st.markdown(
-            "Введите запрос и нажмите **Найти**.\n\n"
-            "После поиска появятся две вкладки: **Ответ** для пользователя и **Отладка** для разработчика."
-        )
+        st.markdown("Введите запрос и нажмите **Найти**")
