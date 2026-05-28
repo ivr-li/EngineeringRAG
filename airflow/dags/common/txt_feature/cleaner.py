@@ -22,11 +22,13 @@ _NOISE_HEADINGS = re.compile(
     re.IGNORECASE,
 )
 _FIGURE_CAPTION = re.compile(r"^\d+\s*[-–-]\s+\S+")
-_TECHEXPERT_WATERMARKS: tuple[str, ...] = (
-    r"Внимание!\s*Документ включен в доказательную базу технического регламента\."
-    r"ИС\s*«Техэксперт:[^»]*»\s*Интранет[^\n]*",
-    r"Дополнительную информацию см\. в ярлыке\s*[«\"]Примечания[»\"][^\n]*",
-)
+_TECHEXPERT_WATERMARKS = [
+    r"Внимание!\s*Документ\s*имеет\s*особый\s*порядок\s*вступления\s*в\s*силу\.[^\n]*\n?",
+    r"Внимание!\s*Документ\s*включен\s*в\s*доказательную\s*базу\s*технического\s*регламента\.[^\n]*\n?",
+    r"Дополнительную\s*информацию\s*см\.\s*в\s*ярлыке\s*[«\"]Примечания[»\"][^\n]*\n?",
+    r"ИС\s*«Техэксперт:[^»]*»\s*Интранет[^\n]*\n?",
+    r"См\s*ярлык\s*[\"«]Примечания[\"»][^\n]*\n?",
+]
 
 _MANDATORY_PATTERNS: list[str] = [
     # СНиП, ГОСТ
@@ -46,6 +48,22 @@ _CROSS_PATTERNS: list[str] = [
     r"[Пп]риложени[еяй]\s*[А-ЯA-Z\d]+",
 ]
 _TOKENIZER = AutoTokenizer.from_pretrained("BAAI/bge-m3")
+
+
+def attach_table_captions(text: str) -> str:
+    """
+    Before:
+        Таблица 33\n\n| col1 | col2 |
+    After:
+        | <!-- Таблица 33 --> col1 | col2 |
+    """
+    text = re.sub(
+        r"((?:Таблица|Рисунок)\s+\d+[^\n]*)\n{2,}(\|)",
+        r"\1\n\2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
 
 
 @lru_cache(maxsize=1)
@@ -87,7 +105,9 @@ def _enrich_metadata(chunk: dict) -> dict:
     headings = chunk.get("headings", [])
     chunk["section_level"] = len(headings)
     chunk["section_path"] = (
-        " > ".join(headings[-2:]) if len(headings) >= 2 else (headings[0] if headings else "")
+        " > ".join(headings[-2:])
+        if len(headings) >= 2
+        else (headings[0] if headings else "")
     )
     chunk["parent_heading"] = headings[-2] if len(headings) > 1 else None
     chunk["leaf_heading"] = headings[-1] if headings else None
@@ -194,6 +214,14 @@ def _count_tokens(text: str) -> int:
     if tok is not None:
         return len(tok.encode(text, add_special_tokens=False))
     return int(len(text.split()) * 1.6)
+
+
+def strip_watermarks(text: str) -> str:
+    for pat in _TECHEXPERT_WATERMARKS:
+        text = re.sub(pat, "", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _clean_text(text: str, headings: list[str]) -> str:
