@@ -8,7 +8,9 @@ EngineeringRAG - локальная RAG-система для поиска по 
 ![Вопрс 2](view2.png)
 ---
 
-## Архитектура
+## Архитектура, кратко.
+
+> Полный дизайy-документ → docs/ML system design doc.md
 
 ### Data Pipeline — Airflow DAG `batch_pipline`
 
