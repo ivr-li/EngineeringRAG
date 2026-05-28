@@ -1,7 +1,7 @@
 x-airflow-common: &airflow-common
     build:
         context: .
-        dockerfile: docker/AirFlow/Dockerfile
+        dockerfile: airflow/docker/AirFlow/Dockerfile
     image: ${AIRFLOW_IMAGE_NAME:-airflow-3.2_cuda-12.9_python-3.12:latest}
     env_file:
         - .env
@@ -10,9 +10,9 @@ x-airflow-common: &airflow-common
         AIRFLOW__CORE__EXECUTOR: CeleryExecutor
         AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY}
         AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-        AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-        AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_postgres/airflow
+        AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow_postgres/airflow
+        AIRFLOW__CELERY__BROKER_URL: redis://:@airflow_redis:6379/0
         AIRFLOW__CORE__FERNET_KEY: ""
         AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
         AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -22,23 +22,24 @@ x-airflow-common: &airflow-common
         PYTHONPATH: /opt/airflow/dags:/opt/airflow/plugins:/opt/airflow
         # AIRFLOW_CONN_MINIO: "aws://minioadmin:minioadmin@minio:9000?endpoint_url=http%3A%2F%2Fminio%3A9000"
         # AIRFLOW_CONN_QDRANT: "http://@qdrant:6333"
+
     volumes:
         - ./airflow/dags:/opt/airflow/dags
         - ./airflow/logs:/opt/airflow/logs
         - ./airflow/config:/opt/airflow/config
         - ./airflow/plugins:/opt/airflow/plugins
     depends_on: &airflow-common-depends-on
-        postgres:
+        airflow_postgres:
             condition: service_healthy
-        redis:
-            condition: service_healthy
-        minio:
+        airflow_redis:
             condition: service_healthy
 
 x-vllm-common: &vllm-common
     image: vllm/vllm-openai:v0.21.0
     ipc: host
     restart: always
+    env_file:
+        - .env
     volumes:
         - ./data/huggingface_cache:/root/.cache/huggingface
     environment:
@@ -53,6 +54,41 @@ x-vllm-common: &vllm-common
                       capabilities: [gpu]
 
 services:
+    # retriever_api:
+    #     build:
+    #         context: .
+    #         dockerfile: services/retriever/Dockerfile
+    #     container_name: retriever_api
+    #     restart: unless-stopped
+    #     ports:
+    #         - "9123:9123"
+    postgres:
+        image: postgres:18
+        container_name: postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_DB: app_db
+            POSTGRES_USER: app_user
+            POSTGRES_PASSWORD: app_password
+        ports:
+            - "5432:5432"
+        volumes:
+            - ./data/postgres:/var/lib/postgresql
+
+    pgadmin:
+        image: dpage/pgadmin4:9.15.0
+        container_name: pgadmin
+        restart: unless-stopped
+        environment:
+            PGADMIN_DEFAULT_EMAIL: admin@example.com
+            PGADMIN_DEFAULT_PASSWORD: admin
+        ports:
+            - "5000:80"
+        volumes:
+            - ./data/pgadmin:/var/lib/pgadmin
+        depends_on:
+            - postgres
+
     vllm-light:
         <<: *vllm-common
         container_name: vllm-light
@@ -106,8 +142,6 @@ services:
                           device_ids: ["0"]
                           capabilities: [gpu]
         restart: always
-        depends_on:
-            <<: *airflow-common-depends-on
 
     mineru-api:
         image: dvmed/mineru:v3.0.9
@@ -125,8 +159,6 @@ services:
         ipc: host
         healthcheck:
             test: ["CMD-SHELL", "curl -f http://localhost:8000/docs"]
-        depends_on:
-            <<: *airflow-common-depends-on
         deploy:
             resources:
                 reservations:
@@ -172,7 +204,7 @@ services:
             timeout: 10s
             retries: 5
 
-    superset-db:
+    airflow_superset-db:
         image: postgres:16
         environment:
             POSTGRES_USER: superset
@@ -187,21 +219,21 @@ services:
             start_period: 30s
         restart: unless-stopped
 
-    superset:
+    airflow_superset:
         image: apache/superset:6.1.0rc2-py312
         ports:
             - "5054:8088"
         environment:
-            SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-revti-etl-superset-secret-change-me}
+            SUPERSET_SECRET_KEY: ${AIRFLOW_SUPERSET_SECRET_KEY:-revti-etl-superset-secret-change-me}
             SUPERSET_LOAD_EXAMPLES: "no"
         depends_on:
-            superset-db:
+            airflow_superset-db:
                 condition: service_healthy
         restart: unless-stopped
         volumes:
             - superset-home:/app/superset_home
 
-    postgres:
+    airflow_postgres:
         image: postgres:16
         environment:
             POSTGRES_USER: airflow
@@ -215,12 +247,12 @@ services:
             retries: 5
         restart: always
 
-    redis:
+    airflow_redis:
         image: redis:7.2-bookworm
         expose:
             - 6379
         healthcheck:
-            test: ["CMD", "redis-cli", "ping"]
+            test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
             interval: 10s
             timeout: 30s
             retries: 50
@@ -254,11 +286,14 @@ services:
                   --firstname Admin \
                   --lastname User \
                   --role Admin \
-                  --email admin@example.com || true
+                  --email admin@example.com || echo "User may already exist"
                 airflow connections import /opt/airflow/config/connections.yaml
         restart: "no"
         depends_on:
-            <<: *airflow-common-depends-on
+            airflow_postgres:
+                condition: service_healthy
+            airflow_redis:
+                condition: service_started
 
     airflow-apiserver:
         <<: *airflow-common
@@ -383,7 +418,7 @@ services:
             airflow-init:
                 condition: service_completed_successfully
 
-    flower:
+    airflow_flower:
         <<: *airflow-common
         container_name: airflow-flower
         command: celery flower
@@ -403,9 +438,9 @@ services:
     warehouse-postgres:
         image: postgres:16
         environment:
-            POSTGRES_USER: ${WAREHOUSE_PG_USER:-postgres}
-            POSTGRES_PASSWORD: ${WAREHOUSE_PG_PASSWORD:-postgres}
-            POSTGRES_DB: ${WAREHOUSE_PG_DB:-warehouse}
+            POSTGRES_USER: ${AIRFLOW_WAREHOUSE_PG_USER:-postgres}
+            POSTGRES_PASSWORD: ${AIRFLOW_WAREHOUSE_PG_PASSWORD:-postgres}
+            POSTGRES_DB: ${AIRFLOW_WAREHOUSE_PG_DB:-warehouse}
         ports:
             - "5052:5432"
         volumes:
@@ -416,22 +451,22 @@ services:
             retries: 5
         restart: unless-stopped
 
-    client-postgres:
+    airflow_client-postgres:
         image: postgres:16
         environment:
-            POSTGRES_USER: ${CLIENT_PG_USER:-postgres}
-            POSTGRES_PASSWORD: ${CLIENT_PG_PASSWORD:-postgres}
-            POSTGRES_DB: ${CLIENT_PG_DB:-postgres}
+            POSTGRES_USER: ${AIRFLOW_CLIENT_PG_USER:-postgres}
+            POSTGRES_PASSWORD: ${AIRFLOW_CLIENT_PG_PASSWORD:-postgres}
+            POSTGRES_DB: ${AIRFLOW_CLIENT_PG_DB:-postgres}
         ports:
             - "5051:5432"
         volumes:
             - ./client-postgres-init:/docker-entrypoint-initdb.d
 
-    pgadmin:
+    airflow_pgadmin:
         image: dpage/pgadmin4
         environment:
-            PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@admin.com}
-            PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+            PGADMIN_DEFAULT_EMAIL: ${AIRFLOW_PGADMIN_EMAIL:-admin@admin.com}
+            PGADMIN_DEFAULT_PASSWORD: ${AIRFLOW_PGADMIN_PASSWORD:-admin}
         ports:
             - "5050:80"
         restart: unless-stopped
@@ -443,3 +478,5 @@ volumes:
     postgres-warehouse-volume:
     qdrant-storage:
     postgres-db-volume:
+    pg_data:
+    pgadmin_data:
