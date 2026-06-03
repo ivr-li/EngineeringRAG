@@ -1,5 +1,10 @@
 import json
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+import structlog
+from config import RetrievalResult
 
 log = structlog.get_logger(__name__)
 
@@ -48,6 +53,8 @@ class QueryLogger:
                     "is_table": result.is_table,
                     "man_refs": result.man_refs,
                     "cross_refs": result.cross_refs,
+                    "anchor_refs": result.anchor_refs,
+                    "expanded_from": result.expanded_from,
                     "text": result.text.strip(),
                 }
                 for idx, result in enumerate(results, start=1)

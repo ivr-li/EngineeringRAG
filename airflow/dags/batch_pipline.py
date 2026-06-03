@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import uuid
@@ -5,17 +7,7 @@ from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
-import requests
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-from airflow.providers.http.hooks.http import HttpHook
 from airflow.sdk import dag, task
-from common.sensors.docling_sensor import DoclingBatchStatusSensor
-from common.sensors.mineru_sensor import MineruBatchStatusSensor
-from common.txt_feature.cleaner import (
-    attach_table_captions,
-    process_chunks,
-    strip_watermarks,
-)
 from pendulum import datetime
 
 RAG_DATA_BUCKET = "ragfiles"
@@ -48,35 +40,11 @@ def del_file(file: str | Path) -> None:
 
 
 def load_to_s3(
-    hook: S3Hook,
+    hook: object,
     filepath: str | list[str],
     bucket_name: str = RAG_DATA_BUCKET,
     prefix: str = DEV_DATA_MINERU_MD,
 ) -> list[str] | None:
-    """
-    Upload one or more local files to MinIO (S3-compatible storage).
-
-    Calls ``S3Hook.load_file`` with ``replace=True`` for each path, so
-    existing objects are overwritten. Errors are logged without re-raising.
-
-    Parameters
-    ----------
-    hook : S3Hook
-        Initialised Airflow ``S3Hook`` connected to MinIO.
-    filepath : str or list of str
-        Local file path(s) to upload.
-    bucket_name : str, optional
-        Target MinIO bucket. Default is ``RAG_DATA_BUCKET``.
-    prefix : str, optional
-        Key prefix (folder path) inside the bucket.
-        Default is ``DEV_DATA_MINERU_MD``.
-
-    Returns
-    -------
-    str or None
-        Newline-separated string of uploaded paths on success,
-        ``None`` if an exception occurred.
-    """
     filepath = filepath if isinstance(filepath, list) else [filepath]
     out = ""
     s3_keys = []
@@ -138,6 +106,8 @@ def batch_pipeline():
     def get_buckets_data(
         bucket_name_filter: str | list[str] | None = None,
     ) -> dict[str, list[str]]:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+
         """
         List all accessible MinIO buckets and their top-level prefixes.
 
@@ -205,6 +175,8 @@ def batch_pipeline():
         prefix: str | None = None,
         skip_process: bool = True,
     ) -> list[str]:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+
         """
         Collect all S3 object keys eligible for processing from a bucket.
 
@@ -256,6 +228,8 @@ def batch_pipeline():
     @task
     def check_mineru_health() -> int:
         """Verify that the MinerU API is reachable and healthy"""
+        from airflow.providers.http.hooks.http import HttpHook
+
         hook_mineru = HttpHook(method="GET", http_conn_id="mineru")
         req = hook_mineru.run(endpoint="/health")
         return req.status_code
@@ -303,6 +277,9 @@ def batch_pipeline():
         file_keys: list[str],
         bucket_name: str,
     ) -> list[str]:
+        import requests
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+
         """
         Download files from MinIO and submit them to the MinerU OCR API.
 
@@ -404,6 +381,8 @@ def batch_pipeline():
 
     @task()
     def save_mineru_results(mineru_task_ids: list[str]) -> list[str]:
+        from airflow.providers.http.hooks.http import HttpHook
+
         """
         Fetch completed MinerU results and write Markdown files to ``/tmp``.
 
@@ -456,6 +435,8 @@ def batch_pipeline():
 
     @task
     def load_md_to_minio(mineru_result: list[str]) -> list[str]:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+
         """
         Upload a batch of local ``.md`` files to MinIO and pass paths downstream.
 
@@ -479,6 +460,8 @@ def batch_pipeline():
     # ------------------------------------------------------------------------------------------------
     @task()
     def single_docling():
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+
         """
         List all ``.md`` files in MinIO and batch them for Docling.
 
@@ -504,6 +487,14 @@ def batch_pipeline():
         mineru_result: list[str],
         bucket_name: str,
     ) -> list[str]:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+        from airflow.providers.http.hooks.http import HttpHook
+        from common.txt_feature.cleaner import attach_table_captions, strip_watermarks
+        from common.txt_feature.table_repair import (
+            expand_tables_for_docling,
+            repair_split_tables,
+        )
+
         chunk_task_ids: list[str] = []
         hook_docling = HttpHook(method="POST", http_conn_id="docling")
         hook_minio = S3Hook(aws_conn_id="minio")
@@ -524,10 +515,12 @@ def batch_pipeline():
                 raw_md = f.read()
 
             cleaned_md = strip_watermarks(raw_md)
-            cleaned_md = attach_table_captions(raw_md)
+            cleaned_md = attach_table_captions(cleaned_md)
+            cleaned_md = repair_split_tables(cleaned_md)
+            cleaned_md = expand_tables_for_docling(cleaned_md)
 
             if cleaned_md != raw_md:
-                logging.info(f">>> Striped watermarks from: {file_path}")
+                logging.info(f">>> Normalized markdown before Docling: {file_path}")
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(cleaned_md)
 
@@ -565,6 +558,10 @@ def batch_pipeline():
 
     @task
     def save_docling_results(docling_task_ids: list[str]) -> list[str]:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+        from airflow.providers.http.hooks.http import HttpHook
+        from common.txt_feature.cleaner import process_chunks
+
         """
         Retrieve Docling chunking results, enrich chunks, and persist to MinIO.
 
@@ -723,6 +720,8 @@ def batch_pipeline():
             ("headings", PayloadSchemaType.KEYWORD),
             ("is_table", PayloadSchemaType.BOOL),
             ("man_refs", PayloadSchemaType.KEYWORD),
+            ("cross_refs", PayloadSchemaType.KEYWORD),
+            ("anchor_refs", PayloadSchemaType.KEYWORD),
             # hierarchy metadata
             ("section_level", PayloadSchemaType.INTEGER),
             ("section_path", PayloadSchemaType.KEYWORD),
@@ -731,6 +730,14 @@ def batch_pipeline():
             # sliding-window markers
             ("is_overlap_window", PayloadSchemaType.BOOL),
             ("window_index", PayloadSchemaType.INTEGER),
+            # table continuation metadata
+            ("table_id", PayloadSchemaType.KEYWORD),
+            ("table_caption", PayloadSchemaType.TEXT),
+            ("table_part_index", PayloadSchemaType.INTEGER),
+            ("table_part_total", PayloadSchemaType.INTEGER),
+            ("table_window_index", PayloadSchemaType.INTEGER),
+            ("table_window_total", PayloadSchemaType.INTEGER),
+            ("table_orientation", PayloadSchemaType.KEYWORD),
         ]
 
         for field, schema in indices:
@@ -869,6 +876,7 @@ def batch_pipeline():
                                 # -----References -----
                                 "man_refs": chunk.get("man_refs", []),
                                 "cross_refs": chunk.get("cross_refs", []),
+                                "anchor_refs": chunk.get("anchor_refs", []),
                                 # ----- Hierarchy -----
                                 "headings": chunk.get("headings", []),
                                 "doc_items": chunk.get("doc_items", []),
@@ -882,6 +890,14 @@ def batch_pipeline():
                                     "is_overlap_window", False
                                 ),
                                 "window_index": chunk.get("window_index", 0),
+                                # ----- Table continuation markers -----
+                                "table_id": chunk.get("table_id"),
+                                "table_caption": chunk.get("table_caption"),
+                                "table_part_index": chunk.get("table_part_index"),
+                                "table_part_total": chunk.get("table_part_total"),
+                                "table_window_index": chunk.get("table_window_index"),
+                                "table_window_total": chunk.get("table_window_total"),
+                                "table_orientation": chunk.get("table_orientation"),
                             },
                         )
                     )
@@ -908,6 +924,8 @@ def batch_pipeline():
     # ==========================================================
     # Graph
     # ==========================================================
+    from common.sensors.docling_sensor import DoclingBatchStatusSensor
+
     # ----- 0) Docling single precess -----
     md_loaded = single_docling()
     docling_task_ids = docling_chunk_submit.partial(bucket_name=RAG_DATA_BUCKET).expand(

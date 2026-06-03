@@ -94,11 +94,15 @@ class ResultsView:
         dot = _score_dot(result.score, mode)
         kind = "Таблица" if result.is_table else "Текст"
         overlap_badge = " 🔁" if result.is_overlap_window else ""
+        expanded_info = (
+            f" · ref `{result.expanded_from}`" if result.expanded_from else ""
+        )
         section_info = f" · `{result.section_path}`" if result.section_path else ""
+        table_info = _table_label(result)
 
         label = (
             f"{dot} **#{idx}** `score: {result.score:.4f}` · "
-            f"{kind}{overlap_badge}{section_info} · "
+            f"{kind}{table_info}{overlap_badge}{expanded_info}{section_info} · "
             f"`{result.filename}` · chunk #{result.chunk_index}"
         )
 
@@ -134,6 +138,13 @@ class ResultsView:
             )
             st.markdown(f"**Ссылки:** {badges_cross}", unsafe_allow_html=True)
 
+        if result.anchor_refs:
+            badges_anchor = " ".join(
+                f'<span style="background:#5a4b13;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75em">{ref}</span>'
+                for ref in result.anchor_refs
+            )
+            st.markdown(f"**Якоря:** {badges_anchor}", unsafe_allow_html=True)
+
     def _render_metadata_popover(self, result: RetrievalResult) -> None:
         with st.popover("Метаданные (JSON)"):
             st.json(
@@ -150,11 +161,35 @@ class ResultsView:
                     "leaf_heading": result.leaf_heading,
                     "is_overlap_window": result.is_overlap_window,
                     "window_index": result.window_index,
+                    "table_id": result.table_id,
+                    "table_caption": result.table_caption,
+                    "table_part_index": result.table_part_index,
+                    "table_part_total": result.table_part_total,
+                    "table_window_index": result.table_window_index,
+                    "table_window_total": result.table_window_total,
+                    "table_orientation": result.table_orientation,
                     "man_refs": result.man_refs,
                     "cross_refs": result.cross_refs,
+                    "anchor_refs": result.anchor_refs,
+                    "expanded_from": result.expanded_from,
                 }
             )
 
     @staticmethod
     def _render_empty_prompt() -> None:
         st.markdown("Введите запрос и нажмите **Найти**")
+
+
+def _table_label(result: RetrievalResult) -> str:
+    if not result.is_table:
+        return ""
+    part = _index_label(result.table_part_index, result.table_part_total)
+    window = _index_label(result.table_window_index, result.table_window_total)
+    details = " ".join(value for value in [part, window] if value)
+    return f" `{details}`" if details else ""
+
+
+def _index_label(index: int | None, total: int | None) -> str:
+    if index is None or total is None or total <= 1:
+        return ""
+    return f"{index}/{total}"

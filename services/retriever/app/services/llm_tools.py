@@ -75,18 +75,21 @@ async def compose_answer(
 
 def _build_context(results: list[RetrievalResult]) -> str:
     parts: list[str] = []
-    for idx, result in enumerate(results[: LLMConfig.ANSWER_CONTEXT_LIMIT], start=1):
+    for idx, result in enumerate(_select_context_results(results), start=1):
         headings = " > ".join(result.headings or []) or "—"
         section_path = result.section_path or "—"
-        refs = ", ".join(result.man_refs or result.cross_refs or []) or "—"
+        refs = _refs_context_line(result)
+        table_context = _table_context_line(result)
         parts.append(
             "\n".join(
                 [
                     f"Фрагмент {idx}",
                     f"Документ: {result.filename}",
+                    f"Связь: {_relation_context_line(result)}",
                     f"Раздел: {section_path}",
                     f"Заголовки: {headings}",
                     f"Тип: {'таблица' if result.is_table else 'текст'}",
+                    table_context,
                     f"Ссылки: {refs}",
                     "Текст:",
                     result.text.strip(),
@@ -94,6 +97,73 @@ def _build_context(results: list[RetrievalResult]) -> str:
             )
         )
     return "\n\n---\n\n".join(parts)
+
+
+def _select_context_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
+    selected: list[RetrievalResult] = []
+    seen: set[str] = set()
+    primary_count = 0
+    for result in results:
+        if result.id in seen or not _should_include_context_result(result, primary_count):
+            continue
+        if len(selected) >= LLMConfig.ANSWER_CONTEXT_HARD_LIMIT:
+            break
+        selected.append(result)
+        seen.add(result.id)
+        if not result.expanded_from:
+            primary_count += 1
+    return selected
+
+
+def _should_include_context_result(
+    result: RetrievalResult,
+    primary_count: int,
+) -> bool:
+    if _is_required_reference_result(result):
+        return True
+    if result.expanded_from:
+        return primary_count < LLMConfig.ANSWER_CONTEXT_LIMIT
+    return primary_count < LLMConfig.ANSWER_CONTEXT_LIMIT
+
+
+def _is_required_reference_result(result: RetrievalResult) -> bool:
+    if not result.expanded_from:
+        return False
+    return (
+        result.is_table
+        or result.expanded_from.startswith("table:")
+        or result.expanded_from.startswith("table_id:")
+    )
+
+
+def _relation_context_line(result: RetrievalResult) -> str:
+    if result.expanded_from:
+        return f"подтянут по внутренней ссылке {result.expanded_from}"
+    return "основной результат поиска"
+
+
+def _refs_context_line(result: RetrievalResult) -> str:
+    refs = []
+    refs.extend(f"external:{ref}" for ref in result.man_refs)
+    refs.extend(result.cross_refs)
+    refs.extend(f"anchor:{ref}" for ref in result.anchor_refs)
+    return ", ".join(refs) or "—"
+
+
+def _table_context_line(result: RetrievalResult) -> str:
+    if not result.is_table:
+        return "Таблица: —"
+
+    caption = result.table_caption or result.leaf_heading or "—"
+    part = _format_index(result.table_part_index, result.table_part_total)
+    window = _format_index(result.table_window_index, result.table_window_total)
+    return f"Таблица: {caption}; часть: {part}; окно: {window}"
+
+
+def _format_index(index: int | None, total: int | None) -> str:
+    if index is None or total is None:
+        return "—"
+    return f"{index}/{total}"
 
 
 def _fallback_answer(results: list[RetrievalResult]) -> str:

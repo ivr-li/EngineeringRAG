@@ -13,3 +13,4 @@ QWEN.md
 .zed
 .pytest_cache
 retriever_service/logs
+AGENTS.md

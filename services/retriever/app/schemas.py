@@ -1,4 +1,3 @@
-from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -11,6 +10,8 @@ class LLMConfig:
     ANSTER_BASE_URL = REWRITER_BASE_URL
     ANSTER_MODEL = REWRITER_MODEL
     ANSWER_CONTEXT_LIMIT = 6
+    ANSWER_CONTEXT_HARD_LIMIT = 24
+    ANSWER_MAX_TOKENS = 1600
     SearchMode = Literal["hybrid", "dense", "sparse"]
     SCORE_THRESHOLD = 0.0
 
@@ -22,6 +23,8 @@ class SearchRequest(BaseModel):
     mode: Literal["hybrid", "dense", "sparse"] = "hybrid"
     only_tables: bool | None = None
     use_rewriter: bool = True
+    expand_refs: bool = True
+    ref_depth: int = 1
     filename_filter: str | None = None
     section_filter: str | None = None
     rewrite_system_prompt: str
@@ -40,6 +43,8 @@ class RetrievalResult(BaseModel):
     # references
     man_refs: list[str]
     cross_refs: list[str]
+    anchor_refs: list[str] = []
+    expanded_from: str | None = None
 
     # hierarchy metadata
     section_path: str = ""
@@ -50,6 +55,15 @@ class RetrievalResult(BaseModel):
     # sliding window markers
     is_overlap_window: bool = False
     window_index: int = 0
+
+    # table continuation metadata
+    table_id: str | None = None
+    table_caption: str | None = None
+    table_part_index: int | None = None
+    table_part_total: int | None = None
+    table_window_index: int | None = None
+    table_window_total: int | None = None
+    table_orientation: str | None = None
 
 
 class SearchResponse(BaseModel):

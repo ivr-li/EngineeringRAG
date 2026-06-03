@@ -69,6 +69,8 @@ class RetrievalResult(BaseModel):
     # references
     man_refs: list[str]
     cross_refs: list[str]
+    anchor_refs: list[str] = []
+    expanded_from: str | None = None
 
     # hierarchy metadata
     section_path: str = ""
@@ -79,3 +81,12 @@ class RetrievalResult(BaseModel):
     # sliding window markers
     is_overlap_window: bool = False
     window_index: int = 0
+
+    # table continuation metadata
+    table_id: str | None = None
+    table_caption: str | None = None
+    table_part_index: int | None = None
+    table_part_total: int | None = None
+    table_window_index: int | None = None
+    table_window_total: int | None = None
+    table_orientation: str | None = None

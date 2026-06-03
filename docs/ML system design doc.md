@@ -265,6 +265,7 @@
 - [x] Поведение при отсутствии ответа в базе
 - [x] FastAPI сервис для поиска
 - [ ] Отладка фильтрации по имени файла
+- [ ] Пробелмы с таблицами. Таблици на разных листах разделяются на отдельные и так же если таблица больщая, то она не влазит в чанк .airflow/dags/files_eximple
 - [ ] Передача изображений из Payload в контекст
 - [ ] История запросов
 ### Data Pipeline
@@ -282,7 +283,7 @@
 
 ## Материалы
 
-- [Шаблон ML System Design Doc [RU] — Reliable ML](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru)
+- [Шаблон ML System Design Doc [RU]] — Reliable ML](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru)
 - [ML Design Docs — Eugene Yan (AWS)](https://eugeneyan.com/writing/ml-design-docs/)
 - [BAAI/bge-m3 — FlagEmbedding](https://huggingface.co/BAAI/bge-m3)
 - [Qdrant Hybrid Search Documentation](https://qdrant.tech/documentation/tutorials-basics/reranking-hybrid-search/)
