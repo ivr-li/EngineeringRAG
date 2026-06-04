@@ -1,5 +1,4 @@
 import structlog
-import uvicorn
 from fastapi import Body, FastAPI
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
@@ -52,6 +51,8 @@ async def search(request: SearchRequest = Body(..., description="Search paramete
         prefetch_k=request.prefetch_k,
         mode=request.mode,
         only_tables=request.only_tables,
+        expand_refs=request.expand_refs,
+        ref_depth=request.ref_depth,
         filename_filter=request.filename_filter,
         section_filter=request.section_filter,
     )
@@ -104,5 +105,6 @@ async def compose_answer_endpoint(
     return {"answer": answer}
 
 
-if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="0.0.0.0", port=9123, reload=True)
+# python -m uvicorn app.main:app --host 0.0.0.0 --port 9123 --reload
+# if __name__ == "__main__":
+# uvicorn.run("app.main:app", host="0.0.0.0", port=9123, reload=True)

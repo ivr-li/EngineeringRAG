@@ -26,6 +26,10 @@ class UIConfig:
     - Отвечай только по переданному контексту.
     - Ничего не выдумывай и не добавляй от себя.
     - Если данных недостаточно или они противоречивы, прямо скажи об этом.
+    - Если в контексте есть фрагменты, подтянутые по внутренней ссылке, используй их как обязательное основание.
+    - Если текст ссылается на таблицу и таблица передана в контексте, извлеки из нее конкретные значения.
+    - Не ограничивайся фразой "значения указаны в таблице", если строки таблицы есть в контексте.
+    - Если нужную строку или колонку таблицы нельзя однозначно восстановить, явно укажи это в "Ограничениях".
     - Форматируй ответ в Markdown.
     - Пиши на русском языке.
     - Используй структуру:
@@ -69,6 +73,8 @@ class RetrievalResult(BaseModel):
     # references
     man_refs: list[str]
     cross_refs: list[str]
+    anchor_refs: list[str] = []
+    expanded_from: str | None = None
 
     # hierarchy metadata
     section_path: str = ""
@@ -79,3 +85,12 @@ class RetrievalResult(BaseModel):
     # sliding window markers
     is_overlap_window: bool = False
     window_index: int = 0
+
+    # table continuation metadata
+    table_id: str | None = None
+    table_caption: str | None = None
+    table_part_index: int | None = None
+    table_part_total: int | None = None
+    table_window_index: int | None = None
+    table_window_total: int | None = None
+    table_orientation: str | None = None
