@@ -70,6 +70,7 @@ def _result_sort_key(result: RetrievalResult) -> tuple[int, int, int]:
 
 def _hit_score(hit) -> float:
     score = getattr(hit, "score", None)
+
     return float(score) if score is not None else 0.0
 
 
@@ -150,6 +151,7 @@ class QdrantRetriever:
             conditions.append(
                 FieldCondition(key="is_table", match=MatchValue(value=only_tables))
             )
+
         if filename_filter:
             conditions.append(
                 FieldCondition(key="filename", match=MatchText(text=filename_filter))
@@ -166,6 +168,7 @@ class QdrantRetriever:
     @staticmethod
     def _hit_to_result(hit) -> RetrievalResult:
         p = hit.payload or {}
+
         return RetrievalResult(
             id=str(hit.id),
             score=_hit_score(hit),
@@ -201,12 +204,16 @@ class QdrantRetriever:
         expanded: list[RetrievalResult] = []
         seen_ids = {result.id for result in results}
         depth = min(ref_depth, REFERENCE_EXPANSION_MAX_DEPTH)
+
         for index, result in enumerate(results):
             expanded.append(result)
+
             if index >= REFERENCE_EXPANSION_TOP_RESULTS:
                 continue
+
             expanded.extend(self._table_sibling_results(result, seen_ids))
             expanded.extend(self._expand_result_refs(result, seen_ids, depth))
+
         return expanded
 
     def _expand_result_refs(
@@ -217,9 +224,12 @@ class QdrantRetriever:
     ) -> list[RetrievalResult]:
         if depth <= 0:
             return []
+
         direct = self._related_results(result, seen_ids)
+
         if depth == 1:
             return direct
+
         return self._with_nested_refs(direct, seen_ids, depth - 1)
 
     def _with_nested_refs(
@@ -229,9 +239,11 @@ class QdrantRetriever:
         depth: int,
     ) -> list[RetrievalResult]:
         expanded: list[RetrievalResult] = []
+
         for result in results:
             expanded.append(result)
             expanded.extend(self._expand_result_refs(result, seen_ids, depth))
+
         return expanded
 
     def _related_results(
@@ -240,8 +252,10 @@ class QdrantRetriever:
         seen_ids: set[str],
     ) -> list[RetrievalResult]:
         related: list[RetrievalResult] = []
+
         for ref in result.cross_refs:
             related.extend(self._scroll_ref_results(result, ref, seen_ids))
+
         return sorted(related, key=_result_sort_key)
 
     def _table_sibling_results(
@@ -251,6 +265,7 @@ class QdrantRetriever:
     ) -> list[RetrievalResult]:
         if not result.is_table or not result.table_id:
             return []
+
         records = self._scroll_filter_records(
             _table_id_filter(result.filename, result.table_id),
             REFERENCE_EXPANSION_LIMIT,
@@ -260,6 +275,7 @@ class QdrantRetriever:
             _table_relation(result.table_id),
             seen_ids,
         )
+
         return sorted(related, key=_result_sort_key)
 
     def _scroll_ref_results(
@@ -272,6 +288,7 @@ class QdrantRetriever:
             _anchor_filter(result.filename, ref),
             REFERENCE_EXPANSION_LIMIT,
         )
+
         return self._records_to_related_results(records, ref, seen_ids)
 
     def _scroll_filter_records(
@@ -281,6 +298,7 @@ class QdrantRetriever:
     ):
         records = []
         next_offset = None
+
         while len(records) < limit:
             batch, next_offset = self.client.scroll(
                 collection_name=self.collection,
@@ -291,8 +309,10 @@ class QdrantRetriever:
                 with_vectors=False,
             )
             records.extend(batch)
+
             if not batch or next_offset is None:
                 break
+
         return records
 
     def _records_to_related_results(
@@ -302,14 +322,17 @@ class QdrantRetriever:
         seen_ids: set[str],
     ) -> list[RetrievalResult]:
         results: list[RetrievalResult] = []
+
         for record in records:
             record_id = str(record.id)
             if record_id in seen_ids:
                 continue
+
             related = self._hit_to_result(record)
             related.expanded_from = ref
             seen_ids.add(record_id)
             results.append(related)
+
         return results
 
     def _search_hybrid_rerank(
@@ -407,6 +430,7 @@ class QdrantRetriever:
             return_colbert_vecs=False,
         )
         lw = output["lexical_weights"][0]
+
         sv = SparseVector(
             indices=[int(k) for k in lw.keys()],
             values=[float(v) for v in lw.values()],

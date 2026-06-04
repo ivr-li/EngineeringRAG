@@ -1,11 +1,9 @@
-# ==============================================================
-# LLM tools
-# ==============================================================
 import structlog
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas import LLMConfig, RetrievalResult
+from app.services.context_packer import PackedContext, build_packed_context
 
 log = structlog.get_logger(__name__)
 
@@ -29,6 +27,7 @@ async def _call_llm(
             max_tokens=max_tokens,
         )
         return (resp.choices[0].message.content or "").strip() or None
+
     except Exception as ex:
         log.error("llm_call_error", error=str(ex))
         return None
@@ -42,8 +41,10 @@ async def rewrite_query(
     rewritten = await _call_llm(
         client, system_prompt, query, temperature=0.2, max_tokens=256
     )
+
     if not rewritten:
         return query, False
+
     return rewritten, True
 
 
@@ -53,129 +54,132 @@ async def compose_answer(
     effective_query: str,
     system_prompt: str,
     results: list[RetrievalResult],
+    trace_metadata: dict | None = None,
 ) -> str:
     if not results:
-        return (
-            "## Ответ\n\n"
-            "По этому запросу ничего не найдено в базе.\n\n"
-            "Попробуйте уточнить формулировку, номер документа или нужный раздел."
-        )
+        return _empty_answer()
 
-    context = _build_context(results)
-    user_prompt = (
-        f"Исходный запрос пользователя:\n{query}\n\n"
-        f"Поисковый запрос после переформулирования:\n{effective_query}\n\n"
-        f"Контекст из ретривера:\n{context}"
+    static_prompt = _build_static_prompt(query, effective_query, results)
+    packed = build_packed_context(
+        results=results,
+        query=query,
+        effective_query=effective_query,
+        static_prompt=static_prompt,
+        system_prompt=system_prompt,
     )
-    answer = await _call_llm(
-        client, system_prompt, user_prompt, temperature=0.15, max_tokens=900
-    )
+    _update_trace_metadata(trace_metadata, packed)
+    _log_packed_context(packed)
+
+    answer = await _call_answer_llm(client, system_prompt, static_prompt, packed)
+
     return answer or _fallback_answer(results)
 
 
-def _build_context(results: list[RetrievalResult]) -> str:
-    parts: list[str] = []
-    for idx, result in enumerate(_select_context_results(results), start=1):
-        headings = " > ".join(result.headings or []) or "—"
-        section_path = result.section_path or "—"
-        refs = _refs_context_line(result)
-        table_context = _table_context_line(result)
-        parts.append(
-            "\n".join(
-                [
-                    f"Фрагмент {idx}",
-                    f"Документ: {result.filename}",
-                    f"Связь: {_relation_context_line(result)}",
-                    f"Раздел: {section_path}",
-                    f"Заголовки: {headings}",
-                    f"Тип: {'таблица' if result.is_table else 'текст'}",
-                    table_context,
-                    f"Ссылки: {refs}",
-                    "Текст:",
-                    result.text.strip(),
-                ]
-            )
-        )
-    return "\n\n---\n\n".join(parts)
-
-
-def _select_context_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
-    selected: list[RetrievalResult] = []
-    seen: set[str] = set()
-    primary_count = 0
-    for result in results:
-        if result.id in seen or not _should_include_context_result(result, primary_count):
-            continue
-        if len(selected) >= LLMConfig.ANSWER_CONTEXT_HARD_LIMIT:
-            break
-        selected.append(result)
-        seen.add(result.id)
-        if not result.expanded_from:
-            primary_count += 1
-    return selected
-
-
-def _should_include_context_result(
-    result: RetrievalResult,
-    primary_count: int,
-) -> bool:
-    if _is_required_reference_result(result):
-        return True
-    if result.expanded_from:
-        return primary_count < LLMConfig.ANSWER_CONTEXT_LIMIT
-    return primary_count < LLMConfig.ANSWER_CONTEXT_LIMIT
-
-
-def _is_required_reference_result(result: RetrievalResult) -> bool:
-    if not result.expanded_from:
-        return False
+def _empty_answer() -> str:
     return (
-        result.is_table
-        or result.expanded_from.startswith("table:")
-        or result.expanded_from.startswith("table_id:")
+        "## Ответ\n\n"
+        "По этому запросу ничего не найдено в базе.\n\n"
+        "Попробуйте уточнить формулировку, номер документа или нужный раздел."
     )
 
 
-def _relation_context_line(result: RetrievalResult) -> str:
-    if result.expanded_from:
-        return f"подтянут по внутренней ссылке {result.expanded_from}"
-    return "основной результат поиска"
+def _build_static_prompt(
+    query: str,
+    effective_query: str,
+    results: list[RetrievalResult],
+) -> str:
+    usage_rules = _context_usage_rules(results)
+
+    return (
+        f"Исходный запрос пользователя:\n{query}\n\n"
+        f"Поисковый запрос после переформулирования:\n{effective_query}\n\n"
+        f"Правила использования найденного контекста:\n{usage_rules}"
+    )
 
 
-def _refs_context_line(result: RetrievalResult) -> str:
-    refs = []
-    refs.extend(f"external:{ref}" for ref in result.man_refs)
-    refs.extend(result.cross_refs)
-    refs.extend(f"anchor:{ref}" for ref in result.anchor_refs)
-    return ", ".join(refs) or "—"
+def _update_trace_metadata(
+    trace_metadata: dict | None,
+    packed: PackedContext,
+) -> None:
+    if trace_metadata is None:
+        return
+
+    trace_metadata["context_packing"] = {
+        "included_count": packed.included_count,
+        "dropped_count": packed.dropped_count,
+        "used_tokens": packed.used_tokens,
+        "budget_tokens": packed.budget_tokens,
+        "max_output_tokens": packed.max_output_tokens,
+    }
 
 
-def _table_context_line(result: RetrievalResult) -> str:
-    if not result.is_table:
-        return "Таблица: —"
+def _log_packed_context(packed: PackedContext) -> None:
+    log.info(
+        "llm_context_packed",
+        included=packed.included_count,
+        dropped=packed.dropped_count,
+        used_tokens=packed.used_tokens,
+        budget_tokens=packed.budget_tokens,
+        max_output_tokens=packed.max_output_tokens,
+    )
 
-    caption = result.table_caption or result.leaf_heading or "—"
-    part = _format_index(result.table_part_index, result.table_part_total)
-    window = _format_index(result.table_window_index, result.table_window_total)
-    return f"Таблица: {caption}; часть: {part}; окно: {window}"
+
+async def _call_answer_llm(
+    client: OpenAI,
+    system_prompt: str,
+    static_prompt: str,
+    packed: PackedContext,
+) -> str | None:
+    user_prompt = f"{static_prompt}\n\nКонтекст из ретривера:\n{packed.text}"
+    return await _call_llm(
+        client,
+        system_prompt,
+        user_prompt,
+        temperature=0.15,
+        max_tokens=packed.max_output_tokens,
+    )
 
 
-def _format_index(index: int | None, total: int | None) -> str:
-    if index is None or total is None:
-        return "—"
-    return f"{index}/{total}"
+def _build_context(results: list[RetrievalResult]) -> str:
+    packed = build_packed_context(
+        results=results,
+        query="",
+        effective_query="",
+        static_prompt="",
+        system_prompt="",
+    )
+    return packed.text
+
+
+def _context_usage_rules(results: list[RetrievalResult]) -> str:
+    rules = [
+        "- Фрагменты, подтянутые по внутренней ссылке, являются обязательным контекстом.",
+        "- Если текст ссылается на таблицу и таблица есть в контексте, извлеки из нее конкретные значения.",
+        "- Не отвечай только фразой, что значения указаны в таблице, если строки таблицы переданы ниже.",
+        "- Если нужную строку или колонку нельзя однозначно восстановить, прямо укажи это ограничение.",
+    ]
+
+    if any(result.is_table for result in results):
+        rules.append(
+            "- Для таблиц сохраняй подпись, часть/окно и приводимые значения в разделе "
+            '"Что удалось найти".'
+        )
+    return "\n".join(rules)
 
 
 def _fallback_answer(results: list[RetrievalResult]) -> str:
     bullets: list[str] = []
     basis: list[str] = []
+
     for result in results[:3]:
         snippet = " ".join(result.text.strip().split())[:280]
         if snippet:
             bullets.append(f"- {snippet}...")
+
         label = result.filename
         if result.section_path:
             label += f", раздел {result.section_path}"
+
         basis.append(f"- {label}")
 
     answer_parts = [
@@ -191,4 +195,5 @@ def _fallback_answer(results: list[RetrievalResult]) -> str:
         "## Основание",
         *(basis or ["- Подходящие фрагменты не найдены."]),
     ]
+
     return "\n".join(answer_parts)

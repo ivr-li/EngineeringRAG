@@ -7,17 +7,29 @@ class LLMConfig:
     REWRITER_BASE_URL = "http://localhost:8020/v1"
     REWRITER_MODEL = "query-rewriter"
 
-    ANSTER_BASE_URL = REWRITER_BASE_URL
-    ANSTER_MODEL = REWRITER_MODEL
+    ANSWER_BASE_URL = REWRITER_BASE_URL
+    ANSWER_MODEL = REWRITER_MODEL
     ANSWER_CONTEXT_LIMIT = 6
     ANSWER_CONTEXT_HARD_LIMIT = 24
+    ANSWER_MODEL_CONTEXT_TOKENS = 10000
     ANSWER_MAX_TOKENS = 1600
+    ANSWER_MIN_TOKENS = 512
+    ANSWER_TOKEN_SAFETY_MARGIN = 700
+    ANSWER_MIN_CONTEXT_TOKENS = 1200
+    ANSWER_MAX_TEXT_BLOCK_TOKENS = 700
+    ANSWER_MAX_TABLE_HEADER_TOKENS = 260
+    ANSWER_MAX_TABLE_ROW_TOKENS = 650
+    ANSWER_MAX_TABLE_SNIPPETS = 4
+    ANSWER_TABLE_SNIPPET_CHARS = 900
     SearchMode = Literal["hybrid", "dense", "sparse"]
     SCORE_THRESHOLD = 0.0
 
 
 class SearchRequest(BaseModel):
     query: str
+    user_id: str | None = None
+    session_id: str | None = None
+    client_metadata: dict | None = None
     top_k: int = 10
     prefetch_k: int = 40
     mode: Literal["hybrid", "dense", "sparse"] = "hybrid"
