@@ -3,7 +3,11 @@ from contextlib import asynccontextmanager
 import structlog
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI
+from minio import Minio
 from openai import OpenAI
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+)
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas import (
@@ -16,7 +20,9 @@ from app.schemas import (
 )
 from app.services import (
     MinioTraceLogger,
+    PGTraceLogger,
     QdrantRetriever,
+    TraceLogger,
     compose_answer,
     get_bge_m3,
     rewrite_query,
@@ -30,21 +36,40 @@ llm_client = OpenAI(
     api_key="",
     timeout=120,
 )
-trace_logger = MinioTraceLogger(
-    endpoint="localhost:9000",
-    access_key="minioadmin",
-    secret_key="minioadmin",
-    bucket_name="ragfiles",
-    secure=False,
-    prefix="/dev_data/logs/query-traces",
-)
+
+trace_logger: TraceLogger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await trace_logger.ensure_bucket()
+    global trace_logger
+    minio_client = Minio(
+        endpoint="localhost:9000",
+        access_key="minioadmin",
+        secret_key="minioadmin",
+        secure=False,
+    )
+    engine = create_async_engine(
+        "postgresql+asyncpg://app_user:app_password@localhost:5432/app_db",
+        pool_pre_ping=True,
+    )
+
+    trace_logger = TraceLogger(
+        minio_logger=MinioTraceLogger(
+            client=minio_client,
+            bucket_name="ragfiles",
+            prefix="/dev_data/logs/query-traces",
+        ),
+        trace_repository=PGTraceLogger(engine),
+    )
+
+    await trace_logger.ensure_storage()
     get_bge_m3()
-    yield
+
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 app = FastAPI(title="Construction RAG API", lifespan=lifespan)
