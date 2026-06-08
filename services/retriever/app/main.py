@@ -94,8 +94,8 @@ async def search(request: SearchRequest = Body(..., description="Search paramete
         prefetch_k=request.prefetch_k,
     )
 
-    with trace.measure("latency_ms"):
-        try:
+    try:
+        with trace.measure("latency_ms"):
             effective_query = request.query
             was_rewritten = False
 
@@ -152,11 +152,11 @@ async def search(request: SearchRequest = Body(..., description="Search paramete
                 effective_query=effective_query,
                 was_rewritten=was_rewritten,
             )
-        except Exception as ex:
-            trace.error = str(ex)
-            raise
-        finally:
-            await trace_logger.log(trace)
+    except Exception as ex:
+        trace.error = str(ex)
+        raise
+    finally:
+        await trace_logger.log(trace)
 
 
 @app.post("/rewrite_query")
