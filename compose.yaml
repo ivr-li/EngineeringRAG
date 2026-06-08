@@ -204,6 +204,33 @@ services:
             timeout: 10s
             retries: 5
 
+    minio-init:
+        image: minio/mc:latest
+        container_name: minio-init
+        restart: "no"
+        depends_on:
+            minio:
+                condition: service_healthy
+        environment:
+            MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+            MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+            TRACE_MINIO_ACCESS_KEY: ${TRACE_MINIO_ACCESS_KEY}
+            TRACE_MINIO_SECRET_KEY: ${TRACE_MINIO_SECRET_KEY}
+            TRACE_MINIO_BUCKET: ${TRACE_MINIO_BUCKET:-rag-data}
+        volumes:
+            - ./configs/minio/trace-logger-policy.json:/policies/trace-logger-policy.json:ro
+        entrypoint: /bin/sh
+        command:
+            - -c
+            - |
+                set -e
+                mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+                mc mb --ignore-existing "local/$$TRACE_MINIO_BUCKET"
+                mc admin policy create local trace-logger /policies/trace-logger-policy.json
+                mc admin user info local "$$TRACE_MINIO_ACCESS_KEY" >/dev/null 2>&1 || \
+                    mc admin user add local "$$TRACE_MINIO_ACCESS_KEY" "$$TRACE_MINIO_SECRET_KEY"
+                mc admin policy attach local trace-logger --user "$$TRACE_MINIO_ACCESS_KEY"
+
     airflow_superset-db:
         image: postgres:16
         environment:

@@ -1,19 +1,53 @@
+from contextlib import asynccontextmanager
+
 import structlog
+from dotenv import load_dotenv
 from fastapi import Body, FastAPI
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
-from app.schemas import LLMConfig, RetrievalResult, SearchRequest, SearchResponse
-from app.services import QdrantRetriever, compose_answer, rewrite_query
+from app.schemas import (
+    LLMConfig,
+    QueryTrace,
+    RetrievalResult,
+    RetrievedChunkTrace,
+    SearchRequest,
+    SearchResponse,
+)
+from app.services import (
+    MinioTraceLogger,
+    QdrantRetriever,
+    compose_answer,
+    get_bge_m3,
+    rewrite_query,
+)
 
-app = FastAPI(title="Construction RAG API")
 log = structlog.get_logger(__name__)
+load_dotenv()
 retriever = QdrantRetriever()
 llm_client = OpenAI(
     base_url=LLMConfig.REWRITER_BASE_URL,
     api_key="",
     timeout=120,
 )
+trace_logger = MinioTraceLogger(
+    endpoint="localhost:9000",
+    access_key="minioadmin",
+    secret_key="minioadmin",
+    bucket_name="ragfiles",
+    secure=False,
+    prefix="/dev_data/logs/query-traces",
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await trace_logger.ensure_bucket()
+    get_bge_m3()
+    yield
+
+
+app = FastAPI(title="Construction RAG API", lifespan=lifespan)
 
 
 # ==============================================================
@@ -28,51 +62,76 @@ async def root():
 
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest = Body(..., description="Search parameters")):
-    effective_query = request.query
-    was_rewritten = False
-
-    if request.use_rewriter and request.rewrite_system_prompt:
-        effective_query, was_rewritten = await rewrite_query(
-            client=llm_client,
-            query=request.query,
-            system_prompt=request.rewrite_system_prompt,
-        )
-        log.info(
-            "query_rewritten",
-            original=request.query,
-            effective=effective_query,
-            was_rewritten=was_rewritten,
-        )
-
-    results = await run_in_threadpool(
-        retriever.search,
-        query=effective_query,
+    trace = QueryTrace(
+        query=request.query,
+        search_mode=request.mode,
         top_k=request.top_k,
         prefetch_k=request.prefetch_k,
-        mode=request.mode,
-        only_tables=request.only_tables,
-        expand_refs=request.expand_refs,
-        ref_depth=request.ref_depth,
-        filename_filter=request.filename_filter,
-        section_filter=request.section_filter,
     )
 
-    answer: str | None = None
-    if request.compose_system_prompt and results:
-        answer = await compose_answer(
-            client=llm_client,
-            query=request.query,
-            effective_query=effective_query,
-            system_prompt=request.compose_system_prompt,
-            results=results,
-        )
-    log.info("SearchResponse is finished")
-    return SearchResponse(
-        results=results,
-        answer=answer,
-        effective_query=effective_query,
-        was_rewritten=was_rewritten,
-    )
+    with trace.measure("latency_ms"):
+        try:
+            effective_query = request.query
+            was_rewritten = False
+
+            if request.use_rewriter and request.rewrite_system_prompt:
+                with trace.measure("rewrite_latency_ms"):
+                    effective_query, was_rewritten = await rewrite_query(
+                        client=llm_client,
+                        query=request.query,
+                        system_prompt=request.rewrite_system_prompt,
+                    )
+                trace.rewritten_query = effective_query
+
+            with trace.measure("retrieval_latency_ms"):
+                results = await run_in_threadpool(
+                    retriever.search,
+                    query=effective_query,
+                    top_k=request.top_k,
+                    prefetch_k=request.prefetch_k,
+                    mode=request.mode,
+                    only_tables=request.only_tables,
+                    expand_refs=request.expand_refs,
+                    ref_depth=request.ref_depth,
+                    filename_filter=request.filename_filter,
+                    section_filter=request.section_filter,
+                )
+
+            for index, result in enumerate(results, start=1):
+                trace.retrieved.append(
+                    RetrievedChunkTrace(
+                        chunk_id=result.id,
+                        filename=result.filename,
+                        rank=index,
+                        score=result.score,
+                        text=result.text,
+                    )
+                )
+                trace.context_chunks.append(result.id)
+
+            answer: str | None = None
+            if request.compose_system_prompt and results:
+                with trace.measure("generation_latency_ms"):
+                    answer = await compose_answer(
+                        client=llm_client,
+                        query=request.query,
+                        effective_query=effective_query,
+                        system_prompt=request.compose_system_prompt,
+                        results=results,
+                    )
+
+            trace.answer = answer
+            return SearchResponse(
+                results=results,
+                answer=answer,
+                effective_query=effective_query,
+                was_rewritten=was_rewritten,
+            )
+        except Exception as ex:
+            trace.error = str(ex)
+            raise
+        finally:
+            await trace_logger.log(trace)
 
 
 @app.post("/rewrite_query")
