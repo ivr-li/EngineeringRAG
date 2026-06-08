@@ -43,7 +43,7 @@ class RetrieverClient:
         resp = requests.post(
             f"{self.url}/search",
             json=request_body,
-            timeout=30,
+            timeout=(5, 180),
         )
         resp.raise_for_status()
         return resp.json()

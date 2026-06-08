@@ -1,4 +1,8 @@
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from time import perf_counter
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -83,3 +87,39 @@ class SearchResponse(BaseModel):
     effective_query: str = Field(...)
     was_rewritten: bool = Field(False)
     results: list[RetrievalResult]
+
+
+class RetrievedChunkTrace(BaseModel):
+    chunk_id: str
+    filename: str
+    rank: int
+    score: float | None = None
+    text: str
+
+
+class QueryTrace(BaseModel):
+    model_config = {"arbitrary_types_allowed": True, "frozen": False}
+
+    query_id: str = Field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    query: str
+    rewritten_query: str | None = None
+    search_mode: str
+    top_k: int
+    prefetch_k: int
+    retrieved: list[RetrievedChunkTrace] = Field(default_factory=list)
+    context_chunks: list[str] = Field(default_factory=list)
+    answer: str | None = None
+    latency_ms: int | None = None
+    rewrite_latency_ms: int | None = None
+    retrieval_latency_ms: int | None = None
+    generation_latency_ms: int | None = None
+    error: str | None = None
+
+    @contextmanager
+    def measure(self, name: str):
+        st = perf_counter()
+        try:
+            yield
+        finally:
+            setattr(self, name, int((perf_counter() - st) * 1000))

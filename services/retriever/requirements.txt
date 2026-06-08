@@ -5,4 +5,5 @@ fastembed-gpu==0.8.0
 python-dotenv==1.2.2
 fastapi==0.136.1
 openai==1.0.0
-minio==7.2.12
+minio==7.2.20
+SQLAlchemy[asyncio]==2.0.49

@@ -29,10 +29,14 @@ REFERENCE_EXPANSION_MAX_DEPTH = 2
 
 @lru_cache(maxsize=1)
 def get_bge_m3() -> BGEM3FlagModel:
+    import os
+
+    cache_dir = os.path.expanduser("~/EngineeringRAG/data/huggingface_cache/hub")
     return BGEM3FlagModel(
         BGE_M3_MODEL,
         use_fp16=torch.cuda.is_available(),
         device="cuda" if torch.cuda.is_available() else "cpu",
+        cache_dir=cache_dir,
     )
 
 
