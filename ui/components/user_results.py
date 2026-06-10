@@ -154,7 +154,6 @@ def _render_response_actions(search: dict) -> str | None:
     )
     with actions:
         refined_query = _render_refine_popover(search)
-        st.markdown("Ответ полезен?")
         feedback = st.container(horizontal=True, gap="small")
         with feedback:
             _render_feedback(search)

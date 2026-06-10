@@ -162,10 +162,6 @@ def _apply_styles() -> None:
             width: auto !important;
             flex: 0 0 auto !important;
         }
-        .st-key-response-actions [data-testid="stMarkdownContainer"] p {
-            margin: 0;
-            white-space: nowrap;
-        }
         .st-key-response-actions button[kind="tertiary"],
         .st-key-response-actions button[kind="primary"] {
             min-width: 1.75rem;
