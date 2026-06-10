@@ -1,3 +1,4 @@
-streamlit==1.35.0
+streamlit==1.57.0
 requests==2.33.1
-structlog==25.0.0
+structlog
+python-dotenv==1.2.2
