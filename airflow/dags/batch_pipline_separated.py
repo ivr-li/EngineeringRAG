@@ -479,7 +479,18 @@ def build_batch_pipeline(dag_id: str, mode: str):
                         # Префикс помогает модели понять контекст при энкодинге
                         tc["text"] = f"[ТАБЛИЦА] {tc.get('text', '')}"
 
-                    all_enriched = process_chunks(text_chunks + table_chunks)
+                    logging.info(
+                        f">>> Processing Docling chunks: "
+                        f"file={file_name}, task_id={task_id}"
+                    )
+                    try:
+                        all_enriched = process_chunks(text_chunks + table_chunks)
+                    except Exception:
+                        logging.exception(
+                            f">>> Failed to process Docling chunks: "
+                            f"file={file_name}, task_id={task_id}"
+                        )
+                        raise
 
                     json_path = f"/tmp/{stem}.json"
                     del_file(json_path)

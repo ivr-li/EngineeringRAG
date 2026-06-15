@@ -125,7 +125,7 @@ def _enrich_metadata(chunk: dict) -> dict:
         Filter(must=[FieldCondition("section_path",
                                     MatchText(text="6 Расчёт"))])
     """
-    headings = chunk.get("headings", [])
+    headings = _get_headings(chunk)
     section_nums = [re.match(r"^[\d\.]+", h) for h in headings]
     chunk["section_id"] = " > ".join(m.group(0) for m in section_nums if m)
     chunk["section_level"] = len(headings)
@@ -452,9 +452,7 @@ def _extract_cross_refs(text: str) -> list[str]:
 def _refresh_reference_metadata(chunk: dict) -> dict:
     text = chunk.get("text", "")
     anchor_refs = _extract_anchor_refs(chunk)
-    cross_refs = [
-        ref for ref in _extract_cross_refs(text) if ref not in set(anchor_refs)
-    ]
+    cross_refs = [ref for ref in _extract_cross_refs(text) if ref not in set(anchor_refs)]
     chunk["anchor_refs"] = anchor_refs
     chunk["cross_refs"] = _unique_refs(cross_refs)
     chunk["man_refs"] = _extract_mandatory_refs(text)
@@ -550,8 +548,8 @@ def _is_noise(chunk: dict) -> bool:
     3. Formula fragment: >60% of tokens are Latin/Cyrillic
        variables with a length of ≤2 characters (E s 0, R s w)
     """
-    headings = chunk.get("headings", [])
-    text = chunk.get("text", "")
+    headings = _get_headings(chunk)
+    text = chunk.get("text") or ""
     words = text.split()
 
     if chunk.get("is_table"):
@@ -630,13 +628,25 @@ def _merge_by_section(
 
 
 def _prepare_chunk(chunk: dict) -> dict:
-    chunk["text"] = _clean_text(chunk.get("text", ""), chunk.get("headings", []))
+    chunk["headings"] = _get_headings(chunk)
+    chunk["doc_items"] = chunk.get("doc_items") or []
+    chunk["text"] = _clean_text(chunk.get("text") or "", chunk["headings"])
+
     _enrich_table_metadata(chunk)
     if chunk.get("is_table"):
-        chunk["text"] = _strip_table_control_text(chunk.get("text", ""))
-    chunk["headings"] = chunk.get("headings", [])
-    chunk["doc_items"] = chunk.get("doc_items", [])
+        chunk["text"] = _strip_table_control_text(chunk.get("text") or "")
+
     return _refresh_reference_metadata(chunk)
+
+
+def _get_headings(chunk: dict) -> list[str]:
+    headings = chunk.get("headings")
+    if isinstance(headings, str):
+        return [headings]
+    if not isinstance(headings, list):
+        return []
+
+    return [heading for heading in headings if isinstance(heading, str)]
 
 
 def _finalize_chunk(chunk: dict, index: int) -> dict:
