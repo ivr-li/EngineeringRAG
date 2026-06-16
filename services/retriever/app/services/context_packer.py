@@ -38,6 +38,10 @@ class PackedContext:
     used_tokens: int
     budget_tokens: int
     max_output_tokens: int
+    candidates: tuple[RetrievalResult, ...] = ()
+    included: tuple[RetrievalResult, ...] = ()
+    excluded: tuple[RetrievalResult, ...] = ()
+    selection_excluded: tuple[RetrievalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,12 +56,16 @@ def build_packed_context(
     effective_query: str,
     static_prompt: str,
     system_prompt: str,
+    expanded_relations: dict[str, str] | None = None,
 ) -> PackedContext:
     terms = _query_terms(f"{query} {effective_query}")
     budget = _build_budget(static_prompt, system_prompt)
-    selected = _select_candidates(results, terms)
+    relations = expanded_relations or {}
+    selected = _select_candidates(results, terms, relations)
+    selected_ids = {result.id for result in selected}
+    selection_excluded = [result for result in results if result.id not in selected_ids]
 
-    return _pack_candidates(selected, terms, budget)
+    return _pack_candidates(selected, selection_excluded, terms, budget, relations)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -113,19 +121,22 @@ def _is_query_term(term: str) -> bool:
 def _select_candidates(
     results: list[RetrievalResult],
     terms: set[str],
+    expanded_relations: dict[str, str],
 ) -> list[RetrievalResult]:
     candidates: list[RetrievalResult] = []
     seen: set[str] = set()
     primary_count = 0
 
     for result in results:
-        if result.id in seen or not _is_candidate_allowed(result, primary_count, terms):
+        if result.id in seen or not _is_candidate_allowed(
+            result, primary_count, terms, expanded_relations
+        ):
             continue
 
         candidates.append(result)
         seen.add(result.id)
 
-        if not result.expanded_from:
+        if result.id not in expanded_relations:
             primary_count += 1
 
         if len(candidates) >= LLMConfig.ANSWER_CONTEXT_HARD_LIMIT:
@@ -138,71 +149,111 @@ def _is_candidate_allowed(
     result: RetrievalResult,
     primary_count: int,
     terms: set[str],
+    expanded_relations: dict[str, str],
 ) -> bool:
     if result.is_table:
-        return _is_table_candidate_allowed(result, terms)
+        return _is_table_candidate_allowed(result, terms, expanded_relations)
 
-    if _is_required_reference_result(result):
+    if _is_required_reference_result(result, expanded_relations):
         return True
 
     return primary_count < LLMConfig.ANSWER_CONTEXT_LIMIT
 
 
-def _is_table_candidate_allowed(result: RetrievalResult, terms: set[str]) -> bool:
+def _is_table_candidate_allowed(
+    result: RetrievalResult,
+    terms: set[str],
+    expanded_relations: dict[str, str],
+) -> bool:
     if _table_has_row_match(result.text, terms):
         return True
 
-    if not result.expanded_from:
+    if result.id not in expanded_relations:
         return True
 
     return (result.table_window_index or 1) == 1
 
 
-def _is_required_reference_result(result: RetrievalResult) -> bool:
-    if not result.expanded_from:
+def _is_required_reference_result(
+    result: RetrievalResult,
+    expanded_relations: dict[str, str],
+) -> bool:
+    relation = expanded_relations.get(result.id)
+    if not relation:
         return False
 
-    return result.expanded_from.startswith(
-        ("table:", "table_id:", "section:", "appendix:")
-    )
+    return relation.startswith(("table:", "table_id:", "section:", "appendix:"))
 
 
 def _pack_candidates(
     candidates: list[RetrievalResult],
+    selection_excluded: list[RetrievalResult],
     terms: set[str],
     budget: _Budget,
+    expanded_relations: dict[str, str],
 ) -> PackedContext:
-    blocks: list[str] = []
-    used = 0
-    dropped = 0
-
-    for result in candidates:
-        block = _format_block(len(blocks) + 1, result, terms)
-        cost = _estimate_tokens(block)
-
-        if used + cost > budget.context_tokens:
-            dropped += 1
-            continue
-
-        blocks.append(block)
-        used += cost
-
+    blocks, included, excluded, used = _fit_candidates(
+        candidates, terms, budget, expanded_relations
+    )
+    dropped = len(excluded)
     text = _append_budget_note("\n\n---\n\n".join(blocks), dropped, budget, used)
 
     return PackedContext(
-        text, len(blocks), dropped, used, budget.context_tokens, budget.output_tokens
+        text=text,
+        included_count=len(blocks),
+        dropped_count=dropped,
+        used_tokens=used,
+        budget_tokens=budget.context_tokens,
+        max_output_tokens=budget.output_tokens,
+        candidates=tuple(candidates),
+        included=tuple(included),
+        excluded=tuple(excluded),
+        selection_excluded=tuple(selection_excluded),
     )
 
 
-def _format_block(index: int, result: RetrievalResult, terms: set[str]) -> str:
+def _fit_candidates(
+    candidates: list[RetrievalResult],
+    terms: set[str],
+    budget: _Budget,
+    expanded_relations: dict[str, str],
+) -> tuple[list[str], list[RetrievalResult], list[RetrievalResult], int]:
+    blocks: list[str] = []
+    included: list[RetrievalResult] = []
+    excluded: list[RetrievalResult] = []
+    used = 0
+
+    for result in candidates:
+        block = _format_block(
+            len(blocks) + 1, result, terms, expanded_relations.get(result.id)
+        )
+        cost = _estimate_tokens(block)
+
+        if used + cost > budget.context_tokens:
+            excluded.append(result)
+            continue
+
+        blocks.append(block)
+        included.append(result)
+        used += cost
+
+    return blocks, included, excluded, used
+
+
+def _format_block(
+    index: int,
+    result: RetrievalResult,
+    terms: set[str],
+    relation: str | None,
+) -> str:
     text = _compact_result_text(result, terms)
     fields = [
         f"Фрагмент {index}",
         f"Документ: {result.filename}",
-        f"Связь: {_relation_line(result)}",
+        f"Связь: {_relation_line(relation)}",
         f"Раздел: {result.section_path or '—'}",
         f"Тип: {'таблица' if result.is_table else 'текст'}",
-        _table_line(result),
+        _table_line(result, relation),
         f"Ссылки: {_refs_line(result)}",
         "Текст:",
         text,
@@ -321,9 +372,9 @@ def _append_budget_note(text: str, dropped: int, budget: _Budget, used: int) -> 
     return f"{text}\n\n---\n\n{note}" if text else note
 
 
-def _relation_line(result: RetrievalResult) -> str:
-    if result.expanded_from:
-        return f"подтянут по внутренней ссылке {result.expanded_from}"
+def _relation_line(relation: str | None) -> str:
+    if relation:
+        return f"подтянут по внутренней ссылке {relation}"
 
     return "основной результат поиска"
 
@@ -336,14 +387,14 @@ def _refs_line(result: RetrievalResult) -> str:
     return ", ".join(refs) or "—"
 
 
-def _table_line(result: RetrievalResult) -> str:
+def _table_line(result: RetrievalResult, relation: str | None) -> str:
     if not result.is_table:
         return "Таблица: —"
 
     caption = result.table_caption or result.leaf_heading or "—"
     part = _format_index(result.table_part_index, result.table_part_total)
     window = _format_index(result.table_window_index, result.table_window_total)
-    required = "; обязательный контекст по ссылке" if result.expanded_from else ""
+    required = "; обязательный контекст по ссылке" if relation else ""
 
     return f"Таблица: {caption}; часть: {part}; окно: {window}{required}"
 

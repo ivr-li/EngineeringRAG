@@ -17,3 +17,6 @@ AGENTS.md
 main copy.py
 files_eximple
 metrics_ab_plan.md
+
+# Retriever eval run artifacts
+services/retriever/app/eval/results/[0-9]*T[0-9]*Z/

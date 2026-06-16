@@ -34,6 +34,9 @@ class SearchRequest(BaseModel):
     user_id: str | None = None
     session_id: str | None = None
     client_metadata: dict | None = None
+    index_version: str = "current"
+    experiment_id: str | None = None
+    variant: str | None = None
     top_k: int = 10
     prefetch_k: int = 40
     mode: Literal["hybrid", "dense", "sparse"] = "hybrid"
@@ -59,8 +62,7 @@ class RetrievalResult(BaseModel):
     # references
     man_refs: list[str]
     cross_refs: list[str]
-    anchor_refs: list[str] = []
-    expanded_from: str | None = None
+    anchor_refs: list[str] = Field(default_factory=list)
 
     # hierarchy metadata
     section_path: str = ""
@@ -110,6 +112,7 @@ class QueryTrace(BaseModel):
     retrieved: list[RetrievedChunkTrace] = Field(default_factory=list)
     context_chunks: list[str] = Field(default_factory=list)
     answer: str | None = None
+    pipeline_result: dict | None = None
     latency_ms: int | None = None
     rewrite_latency_ms: int | None = None
     retrieval_latency_ms: int | None = None
