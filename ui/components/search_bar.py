@@ -16,10 +16,10 @@ class SearchBar:
         col_search, col_clear, _ = st.columns([1, 1, 6])
         with col_search:
             self.search_clicked = st.button(
-                "Найти", type="primary", use_container_width=True
+                "Найти", type="primary", width="stretch"
             )
         with col_clear:
-            if st.button("Сбросить", use_container_width=True):
+            if st.button("Сбросить", width="stretch"):
                 st.session_state.pop("results", None)
                 st.session_state.pop("meta", None)
                 st.rerun()
