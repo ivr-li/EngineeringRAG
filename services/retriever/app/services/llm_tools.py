@@ -2,6 +2,7 @@ import structlog
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
+from app.pipeline.schemas import ExpandedChunk
 from app.schemas import LLMConfig, RetrievalResult
 from app.services.context_packer import PackedContext, build_packed_context
 
@@ -55,17 +56,21 @@ async def compose_answer(
     system_prompt: str,
     results: list[RetrievalResult],
     trace_metadata: dict | None = None,
+    packed_context: PackedContext | None = None,
+    static_prompt: str | None = None,
+    expanded_chunks: list[ExpandedChunk] | None = None,
 ) -> str:
     if not results:
         return _empty_answer()
 
-    static_prompt = _build_static_prompt(query, effective_query, results)
-    packed = build_packed_context(
+    static_prompt, packed = prepare_answer_context(
         results=results,
         query=query,
         effective_query=effective_query,
-        static_prompt=static_prompt,
         system_prompt=system_prompt,
+        packed_context=packed_context,
+        static_prompt=static_prompt,
+        expanded_chunks=expanded_chunks,
     )
     _update_trace_metadata(trace_metadata, packed)
     _log_packed_context(packed)
@@ -73,6 +78,29 @@ async def compose_answer(
     answer = await _call_answer_llm(client, system_prompt, static_prompt, packed)
 
     return answer or _fallback_answer(results)
+
+
+def prepare_answer_context(
+    results: list[RetrievalResult],
+    query: str,
+    effective_query: str,
+    system_prompt: str,
+    packed_context: PackedContext | None = None,
+    static_prompt: str | None = None,
+    expanded_chunks: list[ExpandedChunk] | None = None,
+) -> tuple[str, PackedContext]:
+    prompt = static_prompt or _build_static_prompt(query, effective_query, results)
+    expanded_relations = {item.chunk.id: item.relation for item in expanded_chunks or []}
+    packed = packed_context or build_packed_context(
+        results=results,
+        query=query,
+        effective_query=effective_query,
+        static_prompt=prompt,
+        system_prompt=system_prompt,
+        expanded_relations=expanded_relations,
+    )
+
+    return prompt, packed
 
 
 def _empty_answer() -> str:

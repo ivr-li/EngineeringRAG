@@ -8,8 +8,9 @@ from openai import OpenAI
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
-from starlette.concurrency import run_in_threadpool
 
+from app.pipeline.schemas import PipelineResult
+from app.pipeline.search_pipeline import SearchPipeline
 from app.schemas import (
     LLMConfig,
     QueryTrace,
@@ -38,6 +39,27 @@ llm_client = OpenAI(
 )
 
 trace_logger: TraceLogger
+
+
+def _apply_pipeline_trace(trace: QueryTrace, result: PipelineResult) -> None:
+    trace.rewritten_query = result.effective_question if result.was_rewritten else None
+    trace.answer = result.answer
+    trace.latency_ms = result.timings.latency_ms
+    trace.rewrite_latency_ms = result.timings.rewrite_latency_ms
+    trace.retrieval_latency_ms = result.timings.retrieval_latency_ms
+    trace.generation_latency_ms = result.timings.generation_latency_ms
+    trace.pipeline_result = result.model_dump(mode="json")
+    trace.context_chunks = [chunk.id for chunk in result.context_included]
+    trace.retrieved = [
+        RetrievedChunkTrace(
+            chunk_id=chunk.id,
+            filename=chunk.filename,
+            rank=rank,
+            score=chunk.score,
+            text=chunk.text,
+        )
+        for rank, chunk in enumerate(result.retrieved, start=1)
+    ]
 
 
 @asynccontextmanager
@@ -95,63 +117,16 @@ async def search(request: SearchRequest = Body(..., description="Search paramete
     )
 
     try:
-        with trace.measure("latency_ms"):
-            effective_query = request.query
-            was_rewritten = False
+        pipeline = SearchPipeline(retriever, llm_client, rewrite_query, compose_answer)
+        result = await pipeline.run(request, query_id=trace.query_id)
+        _apply_pipeline_trace(trace, result)
 
-            if request.use_rewriter and request.rewrite_system_prompt:
-                with trace.measure("rewrite_latency_ms"):
-                    effective_query, was_rewritten = await rewrite_query(
-                        client=llm_client,
-                        query=request.query,
-                        system_prompt=request.rewrite_system_prompt,
-                    )
-                trace.rewritten_query = effective_query
-
-            with trace.measure("retrieval_latency_ms"):
-                results = await run_in_threadpool(
-                    retriever.search,
-                    query=effective_query,
-                    top_k=request.top_k,
-                    prefetch_k=request.prefetch_k,
-                    mode=request.mode,
-                    only_tables=request.only_tables,
-                    expand_refs=request.expand_refs,
-                    ref_depth=request.ref_depth,
-                    filename_filter=request.filename_filter,
-                    section_filter=request.section_filter,
-                )
-
-            for index, result in enumerate(results, start=1):
-                trace.retrieved.append(
-                    RetrievedChunkTrace(
-                        chunk_id=result.id,
-                        filename=result.filename,
-                        rank=index,
-                        score=result.score,
-                        text=result.text,
-                    )
-                )
-                trace.context_chunks.append(result.id)
-
-            answer: str | None = None
-            if request.compose_system_prompt and results:
-                with trace.measure("generation_latency_ms"):
-                    answer = await compose_answer(
-                        client=llm_client,
-                        query=request.query,
-                        effective_query=effective_query,
-                        system_prompt=request.compose_system_prompt,
-                        results=results,
-                    )
-
-            trace.answer = answer
-            return SearchResponse(
-                results=results,
-                answer=answer,
-                effective_query=effective_query,
-                was_rewritten=was_rewritten,
-            )
+        return SearchResponse(
+            results=result.results,
+            answer=result.answer,
+            effective_query=result.effective_question,
+            was_rewritten=result.was_rewritten,
+        )
     except Exception as ex:
         trace.error = str(ex)
         raise

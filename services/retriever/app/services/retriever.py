@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -15,11 +18,18 @@ from qdrant_client.models import (
     SparseVector,
 )
 
+from app.pipeline.schemas import ExpandedChunk
 from app.schemas import RetrievalResult
 
 QDRANT_URL = "http://localhost:6333"
 QDRANT_COLLECTION = "construction_docs"
 BGE_M3_MODEL = "BAAI/bge-m3"
+BGE_M3_CACHE_DIR = Path(
+    os.getenv(
+        "BGE_M3_CACHE_DIR",
+        Path(__file__).resolve().parents[4] / "data/huggingface_cache/hub",
+    )
+).expanduser()
 DENSE_SIZE = 1024
 REFERENCE_EXPANSION_LIMIT = 64
 REFERENCE_SCROLL_BATCH = 32
@@ -29,21 +39,40 @@ REFERENCE_EXPANSION_MAX_DEPTH = 2
 
 @lru_cache(maxsize=1)
 def get_bge_m3() -> BGEM3FlagModel:
-    import os
-
-    cache_dir = os.path.expanduser("~/EngineeringRAG/data/huggingface_cache/hub")
     return BGEM3FlagModel(
-        BGE_M3_MODEL,
+        str(_local_bge_m3_snapshot()),
         use_fp16=torch.cuda.is_available(),
         device="cuda" if torch.cuda.is_available() else "cpu",
-        cache_dir=cache_dir,
     )
+
+
+def _local_bge_m3_snapshot() -> Path:
+    model_cache = BGE_M3_CACHE_DIR / f"models--{BGE_M3_MODEL.replace('/', '--')}"
+    revision_file = model_cache / "refs/main"
+    if not revision_file.is_file():
+        raise FileNotFoundError(
+            f"BGE-M3 revision not found at {revision_file}. "
+            "Set BGE_M3_CACHE_DIR to the Hugging Face hub cache directory."
+        )
+
+    snapshot = model_cache / "snapshots" / revision_file.read_text().strip()
+    if not snapshot.is_dir():
+        raise FileNotFoundError(f"BGE-M3 snapshot not found at {snapshot}")
+
+    return snapshot
 
 
 PROVIDERS = (
     ["CUDAExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
 )
 SearchMode = Literal["hybrid", "dense", "sparse"]
+
+
+@dataclass(frozen=True)
+class _ExpansionContext:
+    source: RetrievalResult
+    depth: int
+    path: list[str]
 
 
 def _anchor_filter(filename: str, ref: str) -> Filter:
@@ -130,18 +159,80 @@ class QdrantRetriever:
         filename_filter: str | None = None,
         section_filter: str | None = None,
     ) -> list[RetrievalResult]:
-        qdrant_filter = self._build_filter(only_tables, filename_filter, section_filter)
+        retrieved, expanded = self.search_stages(
+            query=query,
+            top_k=top_k,
+            prefetch_k=prefetch_k,
+            mode=mode,
+            only_tables=only_tables,
+            expand_refs=expand_refs,
+            ref_depth=ref_depth,
+            filename_filter=filename_filter,
+            section_filter=section_filter,
+        )
 
-        if mode == "dense":
-            results = self._search_dense(query, top_k, qdrant_filter)
-        elif mode == "sparse":
-            results = self._search_sparse(query, top_k, qdrant_filter)
-        else:
-            results = self._search_hybrid_rerank(query, top_k, prefetch_k, qdrant_filter)
+        return self.merge_stages(retrieved, expanded)
+
+    def search_stages(
+        self,
+        query: str,
+        top_k: int = 10,
+        prefetch_k: int = 40,
+        mode: SearchMode = "hybrid",
+        only_tables: bool | None = None,
+        expand_refs: bool = True,
+        ref_depth: int = 1,
+        filename_filter: str | None = None,
+        section_filter: str | None = None,
+    ) -> tuple[list[RetrievalResult], list[ExpandedChunk]]:
+        qdrant_filter = self._build_filter(only_tables, filename_filter, section_filter)
+        retrieved = self._search(query, top_k, prefetch_k, mode, qdrant_filter)
 
         if expand_refs and ref_depth > 0:
-            return self._expand_by_refs(results, ref_depth)
-        return results
+            return retrieved, self._expand_by_refs(retrieved, ref_depth)
+
+        return retrieved, []
+
+    def _search(
+        self,
+        query: str,
+        top_k: int,
+        prefetch_k: int,
+        mode: SearchMode,
+        qdrant_filter: Filter | None,
+    ) -> list[RetrievalResult]:
+        if mode == "dense":
+            return self._search_dense(query, top_k, qdrant_filter)
+        if mode == "sparse":
+            return self._search_sparse(query, top_k, qdrant_filter)
+
+        return self._search_hybrid_rerank(query, top_k, prefetch_k, qdrant_filter)
+
+    @staticmethod
+    def merge_stages(
+        retrieved: list[RetrievalResult],
+        expanded: list[ExpandedChunk],
+    ) -> list[RetrievalResult]:
+        expanded_by_source: dict[str, list[ExpandedChunk]] = {}
+        for item in expanded:
+            expanded_by_source.setdefault(item.expanded_from_chunk_id, []).append(item)
+
+        merged: list[RetrievalResult] = []
+        for result in retrieved:
+            merged.append(result)
+            QdrantRetriever._append_expanded(result.id, expanded_by_source, merged)
+
+        return merged
+
+    @staticmethod
+    def _append_expanded(
+        source_id: str,
+        expanded_by_source: dict[str, list[ExpandedChunk]],
+        merged: list[RetrievalResult],
+    ) -> None:
+        for item in expanded_by_source.get(source_id, []):
+            merged.append(item.chunk)
+            QdrantRetriever._append_expanded(item.chunk.id, expanded_by_source, merged)
 
     @staticmethod
     def _build_filter(
@@ -184,7 +275,6 @@ class QdrantRetriever:
             man_refs=p.get("man_refs", []),
             cross_refs=p.get("cross_refs", []),
             anchor_refs=p.get("anchor_refs", []),
-            expanded_from=p.get("expanded_from"),
             section_path=p.get("section_path", ""),
             section_level=p.get("section_level", 0),
             parent_heading=p.get("parent_heading", ""),
@@ -204,69 +294,76 @@ class QdrantRetriever:
         self,
         results: list[RetrievalResult],
         ref_depth: int,
-    ) -> list[RetrievalResult]:
-        expanded: list[RetrievalResult] = []
+    ) -> list[ExpandedChunk]:
+        expanded: list[ExpandedChunk] = []
         seen_ids = {result.id for result in results}
-        depth = min(ref_depth, REFERENCE_EXPANSION_MAX_DEPTH)
+        remaining_depth = min(ref_depth, REFERENCE_EXPANSION_MAX_DEPTH)
 
         for index, result in enumerate(results):
-            expanded.append(result)
-
             if index >= REFERENCE_EXPANSION_TOP_RESULTS:
                 continue
 
-            expanded.extend(self._table_sibling_results(result, seen_ids))
-            expanded.extend(self._expand_result_refs(result, seen_ids, depth))
+            context = _ExpansionContext(result, depth=1, path=[result.id])
+            expanded.extend(self._table_sibling_results(context, seen_ids))
+            expanded.extend(
+                self._expand_result_refs(
+                    context,
+                    seen_ids,
+                    remaining_depth=remaining_depth,
+                )
+            )
 
         return expanded
 
     def _expand_result_refs(
         self,
-        result: RetrievalResult,
+        context: _ExpansionContext,
         seen_ids: set[str],
-        depth: int,
-    ) -> list[RetrievalResult]:
-        if depth <= 0:
+        remaining_depth: int,
+    ) -> list[ExpandedChunk]:
+        if remaining_depth <= 0:
             return []
 
-        direct = self._related_results(result, seen_ids)
+        direct = self._related_results(context, seen_ids)
 
-        if depth == 1:
+        if remaining_depth == 1:
             return direct
 
-        return self._with_nested_refs(direct, seen_ids, depth - 1)
+        return self._with_nested_refs(direct, seen_ids, remaining_depth - 1)
 
     def _with_nested_refs(
         self,
-        results: list[RetrievalResult],
+        expanded_chunks: list[ExpandedChunk],
         seen_ids: set[str],
-        depth: int,
-    ) -> list[RetrievalResult]:
-        expanded: list[RetrievalResult] = []
+        remaining_depth: int,
+    ) -> list[ExpandedChunk]:
+        expanded: list[ExpandedChunk] = []
 
-        for result in results:
-            expanded.append(result)
-            expanded.extend(self._expand_result_refs(result, seen_ids, depth))
+        for item in expanded_chunks:
+            expanded.append(item)
+            context = _ExpansionContext(item.chunk, item.depth + 1, item.path)
+            expanded.extend(self._expand_result_refs(context, seen_ids, remaining_depth))
 
         return expanded
 
     def _related_results(
         self,
-        result: RetrievalResult,
+        context: _ExpansionContext,
         seen_ids: set[str],
-    ) -> list[RetrievalResult]:
-        related: list[RetrievalResult] = []
+    ) -> list[ExpandedChunk]:
+        related: list[ExpandedChunk] = []
 
-        for ref in result.cross_refs:
-            related.extend(self._scroll_ref_results(result, ref, seen_ids))
+        for ref in context.source.cross_refs:
+            related.extend(self._scroll_ref_results(context, ref, seen_ids))
 
-        return sorted(related, key=_result_sort_key)
+        return sorted(related, key=lambda item: _result_sort_key(item.chunk))
 
     def _table_sibling_results(
         self,
-        result: RetrievalResult,
+        context: _ExpansionContext,
         seen_ids: set[str],
-    ) -> list[RetrievalResult]:
+    ) -> list[ExpandedChunk]:
+        result = context.source
         if not result.is_table or not result.table_id:
             return []
 
@@ -274,26 +371,27 @@ class QdrantRetriever:
             _table_id_filter(result.filename, result.table_id),
             REFERENCE_EXPANSION_LIMIT,
         )
-        related = self._records_to_related_results(
+        related = self._records_to_expanded_chunks(
             records,
             _table_relation(result.table_id),
             seen_ids,
+            context,
         )
 
-        return sorted(related, key=_result_sort_key)
+        return sorted(related, key=lambda item: _result_sort_key(item.chunk))
 
     def _scroll_ref_results(
         self,
-        result: RetrievalResult,
+        context: _ExpansionContext,
         ref: str,
         seen_ids: set[str],
-    ) -> list[RetrievalResult]:
+    ) -> list[ExpandedChunk]:
         records = self._scroll_filter_records(
-            _anchor_filter(result.filename, ref),
+            _anchor_filter(context.source.filename, ref),
             REFERENCE_EXPANSION_LIMIT,
         )
 
-        return self._records_to_related_results(records, ref, seen_ids)
+        return self._records_to_expanded_chunks(records, ref, seen_ids, context)
 
     def _scroll_filter_records(
         self,
@@ -319,23 +417,30 @@ class QdrantRetriever:
 
         return records
 
-    def _records_to_related_results(
+    def _records_to_expanded_chunks(
         self,
         records,
-        ref: str,
+        relation: str,
         seen_ids: set[str],
-    ) -> list[RetrievalResult]:
-        results: list[RetrievalResult] = []
+        context: _ExpansionContext,
+    ) -> list[ExpandedChunk]:
+        results: list[ExpandedChunk] = []
 
         for record in records:
             record_id = str(record.id)
             if record_id in seen_ids:
                 continue
 
-            related = self._hit_to_result(record)
-            related.expanded_from = ref
             seen_ids.add(record_id)
-            results.append(related)
+            results.append(
+                ExpandedChunk(
+                    chunk=self._hit_to_result(record),
+                    expanded_from_chunk_id=context.source.id,
+                    relation=relation,
+                    depth=context.depth,
+                    path=[*context.path, record_id],
+                )
+            )
 
         return results
 
