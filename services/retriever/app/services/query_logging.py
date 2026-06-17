@@ -22,6 +22,8 @@ query_traces = Table(
     metadata,
     Column("query_id", PostgreSQLUUID(as_uuid=True), primary_key=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("user_id", Text, nullable=True),
+    Column("session_id", Text, nullable=True),
     Column("query", Text, nullable=False),
     Column("latency_ms", Numeric, nullable=True),
     Column("rewrite_latency_ms", Numeric, nullable=True),
@@ -112,12 +114,13 @@ class PGTraceLogger:
 
     async def ensure_tables(self) -> None:
         database_url = self.engine.url.render_as_string(hide_password=True)
-        log.info(
-            "pg_tables_init_started",
-            database_url=database_url,
-            tables=list(metadata.tables),
-        )
+        _log_pg_init_started(database_url)
 
+        database, schema = await self._create_tables(database_url)
+
+        _log_pg_init_completed(database_url, database, schema)
+
+    async def _create_tables(self, database_url: str) -> tuple[str, str]:
         try:
             async with self.engine.begin() as connection:
                 database, schema = (
@@ -126,6 +129,7 @@ class PGTraceLogger:
                     )
                 ).one()
                 await connection.run_sync(metadata.create_all)
+                await _ensure_query_trace_columns(connection)
         except Exception:
             log.exception(
                 "pg_tables_init_failed",
@@ -133,18 +137,14 @@ class PGTraceLogger:
             )
             raise
 
-        log.info(
-            "pg_tables_init_completed",
-            database_url=database_url,
-            database=database,
-            schema=schema,
-            tables=list(metadata.tables),
-        )
+        return database, schema
 
     async def log(self, trace: QueryTrace) -> None:
         statement = query_traces.insert().values(
             query_id=UUID(trace.query_id),
             created_at=trace.created_at,
+            user_id=trace.user_id,
+            session_id=trace.session_id,
             query=trace.query,
             latency_ms=trace.latency_ms,
             rewrite_latency_ms=trace.rewrite_latency_ms,
@@ -159,3 +159,30 @@ class PGTraceLogger:
             "postgres_trace_logged",
             query_id=trace.query_id,
         )
+
+
+def _log_pg_init_started(database_url: str) -> None:
+    log.info(
+        "pg_tables_init_started",
+        database_url=database_url,
+        tables=list(metadata.tables),
+    )
+
+
+def _log_pg_init_completed(database_url: str, database: str, schema: str) -> None:
+    log.info(
+        "pg_tables_init_completed",
+        database_url=database_url,
+        database=database,
+        schema=schema,
+        tables=list(metadata.tables),
+    )
+
+
+async def _ensure_query_trace_columns(connection) -> None:
+    await connection.execute(
+        text("ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS user_id TEXT")
+    )
+    await connection.execute(
+        text("ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS session_id TEXT")
+    )

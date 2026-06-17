@@ -2,13 +2,11 @@ import hmac
 import os
 
 import streamlit as st
-from components import (
-    ResultsView,
-    RetrieverClient,
-    SearchBar,
-    SidebarParams,
-)
 from dotenv import load_dotenv
+from components.retrieval.client import RetrieverClient
+from components.retrieval.dev_results_view import ResultsView
+from components.retrieval.search_bar import SearchBar
+from components.retrieval.sidebar import SidebarParams
 
 AUTH_KEY = "developer_ui_authorized"
 PASSWORD_ENV = "DEVELOPER_UI_PASSWORD"

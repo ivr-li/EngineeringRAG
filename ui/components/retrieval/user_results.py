@@ -2,7 +2,7 @@ import base64
 import re
 
 import streamlit as st
-from components.feedback_logger import log_feedback
+from shared.logging.feedback_logger import log_feedback
 
 COPY_BUTTON_HTML = """
 <div class="answer-header">
@@ -27,13 +27,13 @@ button.onclick = async () => {{
     display: flex; align-items: baseline; gap: 0.6rem;
     margin: 0 0 0.5rem;
 }}
-h4 {{margin: 0;}}
+h4 {{margin: 0; color: var(--app-text);}}
 button {{
     border: 0; padding: 0.15rem 0;
-    background: transparent; color: #888; cursor: pointer;
+    background: transparent; color: var(--app-muted); cursor: pointer;
     font-size: 0.75rem;
 }}
-button:hover {{color: #444;}}
+button:hover {{color: var(--app-accent);}}
 </style>
 """
 
@@ -46,7 +46,7 @@ def render_search(search: dict) -> str | None:
     with st.chat_message("assistant"):
         _render_answer(search)
         _render_quality_notice(response.get("results", []))
-        _render_sources(response.get("results", []))
+        _render_sources(search["id"], response.get("results", []))
 
     return _render_response_actions(search)
 
@@ -56,8 +56,9 @@ def _render_answer(search: dict) -> None:
     answer = response.get("answer")
     if answer:
         answer_without_heading = _without_answer_heading(answer)
-        _render_answer_header(answer_without_heading, search["id"])
-        st.markdown(answer_without_heading)
+        with st.container(key=f"answer_card_{search['id']}"):
+            _render_answer_header(answer_without_heading, search["id"])
+            st.markdown(answer_without_heading)
     elif response.get("results"):
         st.warning("Ответ не сформирован. Изучите найденные источники ниже.")
     else:
@@ -77,15 +78,16 @@ def _render_quality_notice(results: list[dict]) -> None:
         st.info("Ответ основан только на одном найденном фрагменте.")
 
 
-def _render_sources(results: list[dict]) -> None:
+def _render_sources(search_id: str, results: list[dict]) -> None:
     if not results:
         return
 
-    with st.expander(f"Источники и найденные фрагменты ({len(results)})"):
-        for index, result in enumerate(results, start=1):
-            _render_source(index, result)
-            if index < len(results):
-                st.divider()
+    with st.container(key=f"sources_panel_{search_id}"):
+        with st.expander(f"Источники и найденные фрагменты ({len(results)})"):
+            for index, result in enumerate(results, start=1):
+                _render_source(index, result)
+                if index < len(results):
+                    st.divider()
 
 
 def _render_source(index: int, result: dict) -> None:
@@ -103,7 +105,8 @@ def _source_excerpt(text: str, limit: int = 900) -> str:
 
 
 def _render_question(search: dict) -> None:
-    st.markdown(search["query"])
+    with st.container(key=f"question_card_{search['id']}"):
+        st.markdown(search["query"])
 
 
 def _render_answer_header(answer: str, search_id: str) -> None:

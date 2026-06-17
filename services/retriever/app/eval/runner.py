@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -91,7 +92,12 @@ def _error_record(question: EvalQuestion, error: Exception) -> dict:
 
 async def _run_cli(args: argparse.Namespace) -> Path:
     config = load_run_config(args.config)
-    client = OpenAI(base_url=LLMConfig.REWRITER_BASE_URL, api_key="", timeout=120)
+    api_key = os.getenv("OPENAI_API_KEY") or "EMPTY"
+    client = OpenAI(
+        base_url=LLMConfig.REWRITER_BASE_URL,
+        api_key=api_key,
+        timeout=120,
+    )
     pipeline = SearchPipeline(QdrantRetriever(), client, rewrite_query, compose_answer)
     generation = _generation_calculator(client, config)
     runner = EvalRunner(pipeline, config, generation)

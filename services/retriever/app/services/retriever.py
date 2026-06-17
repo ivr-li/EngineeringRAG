@@ -21,15 +21,10 @@ from qdrant_client.models import (
 from app.pipeline.schemas import ExpandedChunk
 from app.schemas import RetrievalResult
 
-QDRANT_URL = "http://localhost:6333"
-QDRANT_COLLECTION = "construction_docs"
-BGE_M3_MODEL = "BAAI/bge-m3"
-BGE_M3_CACHE_DIR = Path(
-    os.getenv(
-        "BGE_M3_CACHE_DIR",
-        Path(__file__).resolve().parents[4] / "data/huggingface_cache/hub",
-    )
-).expanduser()
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "construction_docs")
+BGE_M3_MODEL = os.getenv("BGE_M3_MODEL", "BAAI/bge-m3")
+BGE_M3_CACHE_DIR = Path("/root/.cache/huggingface/hub")
 DENSE_SIZE = 1024
 REFERENCE_EXPANSION_LIMIT = 64
 REFERENCE_SCROLL_BATCH = 32

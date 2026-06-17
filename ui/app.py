@@ -3,10 +3,14 @@ from uuid import uuid4
 
 import requests
 import streamlit as st
-from auth import get_current_user
-from components import RetrieverClient
-from components.auth_panel import render_auth_panel
-from components.user_history import (
+from core.auth import (
+    get_auth_session_id,
+    get_current_user,
+    initialize_auth,
+    render_auth_cookie_sync,
+)
+from components.account.auth_panel import render_auth_panel
+from components.account.history import (
     add_search,
     get_selected_search,
     initialize_history,
@@ -14,14 +18,15 @@ from components.user_history import (
     render_history_sidebar,
     update_search,
 )
-from components.user_results import render_search
-from config import UIConfig
-from theme import (
+from components.retrieval.client import RetrieverClient
+from components.retrieval.user_results import render_search
+from components.theme import (
     APP_UI_STYLES,
     build_sidebar_layout_css,
     build_theme_css,
     initialize_theme,
 )
+from config import UIConfig
 
 ERROR_KEY = "user_ui_search_error"
 EXAMPLE_QUERIES = (
@@ -46,6 +51,9 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    initialize_auth()
+    render_auth_cookie_sync()
+
     user = get_current_user()
     theme_key = initialize_theme(user.user_id)
     _apply_styles(theme_key, is_sidebar_compact())
@@ -149,10 +157,13 @@ def _search(query: str, search_id: str | None = None) -> None:
 
 
 def _request_search(query: str) -> dict:
+    user = get_current_user()
     with st.status("Обрабатываем запрос...", expanded=True) as status:
         st.write("Передали вопрос поисковому сервису")
         response = RetrieverClient().search(
             query=query,
+            user_id=user.user_id if user.is_authenticated else None,
+            session_id=get_auth_session_id(),
             rewrite_system_prompt=UIConfig.REWRITE_SYSTEM_PROMPT,
             compose_system_prompt=UIConfig.ANSWER_SYSTEM_PROMPT,
             top_k=4,
