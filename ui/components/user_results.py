@@ -4,6 +4,39 @@ import re
 import streamlit as st
 from components.feedback_logger import log_feedback
 
+COPY_BUTTON_HTML = """
+<div class="answer-header">
+    <h4>Ответ</h4>
+    <button id="{button_id}" title="Копировать ответ">⧉ Копировать ответ</button>
+</div>
+<script>
+const button = document.getElementById("{button_id}");
+const bytes = Uint8Array.from(atob("{encoded_text}"), c => c.charCodeAt(0));
+const text = new TextDecoder().decode(bytes);
+button.onclick = async () => {{
+    try {{
+        await navigator.clipboard.writeText(text);
+        button.textContent = "✓ Скопировано";
+    }} catch {{
+        button.textContent = "Копирование недоступно";
+    }}
+}};
+</script>
+<style>
+.answer-header {{
+    display: flex; align-items: baseline; gap: 0.6rem;
+    margin: 0 0 0.5rem;
+}}
+h4 {{margin: 0;}}
+button {{
+    border: 0; padding: 0.15rem 0;
+    background: transparent; color: #888; cursor: pointer;
+    font-size: 0.75rem;
+}}
+button:hover {{color: #444;}}
+</style>
+"""
+
 
 def render_search(search: dict) -> str | None:
     response = search["response"]
@@ -81,38 +114,7 @@ def _render_copy_button(text: str, search_id: str) -> None:
     encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
     button_id = f"copy-question-{search_id}"
     st.html(
-        f"""
-        <div class="answer-header">
-            <h4>Ответ</h4>
-            <button id="{button_id}" title="Копировать ответ">⧉ Копировать ответ</button>
-        </div>
-        <script>
-        const button = document.getElementById("{button_id}");
-        const bytes = Uint8Array.from(atob("{encoded_text}"), c => c.charCodeAt(0));
-        const text = new TextDecoder().decode(bytes);
-        button.onclick = async () => {{
-            try {{
-                await navigator.clipboard.writeText(text);
-                button.textContent = "✓ Скопировано";
-            }} catch {{
-                button.textContent = "Копирование недоступно";
-            }}
-        }};
-        </script>
-        <style>
-        .answer-header {{
-            display: flex; align-items: baseline; gap: 0.6rem;
-            margin: 0 0 0.5rem;
-        }}
-        h4 {{margin: 0;}}
-        button {{
-            border: 0; padding: 0.15rem 0;
-            background: transparent; color: #888; cursor: pointer;
-            font-size: 0.75rem;
-        }}
-        button:hover {{color: #444;}}
-        </style>
-        """,
+        COPY_BUTTON_HTML.format(button_id=button_id, encoded_text=encoded_text),
         unsafe_allow_javascript=True,
     )
 
@@ -193,10 +195,14 @@ def _render_feedback_comment(search: dict) -> None:
 
 
 def _render_refine_popover(search: dict) -> str | None:
-    with st.popover("Уточнить вопрос"):
-        with st.form(f"refine_{search['id']}"):
+    with st.popover("Уточнить вопрос", icon=":material/edit:"):
+        with st.form(f"refine_{search['id']}", border=False):
             query = st.text_area("Новый вопрос", value=search["query"], height=180)
-            submitted = st.form_submit_button("Выполнить поиск", type="primary")
+            submitted = st.form_submit_button(
+                "Обновить ответ",
+                icon=":material/search:",
+                type="primary",
+            )
         if submitted and query.strip():
             return query.strip()
     return None

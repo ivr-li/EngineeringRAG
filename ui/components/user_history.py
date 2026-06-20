@@ -1,23 +1,36 @@
-from datetime import datetime, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 import streamlit as st
 
 HISTORY_KEY = "user_ui_history"
+HISTORY_BY_USER_KEY = "user_ui_history_by_user"
 SELECTED_SEARCH_KEY = "user_ui_selected_search"
+CURRENT_USER_KEY = "user_ui_current_user_id"
+SIDEBAR_COMPACT_KEY = "user_ui_sidebar_compact"
 
 
-def initialize_history() -> None:
-    st.session_state.setdefault(HISTORY_KEY, [])
+def is_sidebar_compact() -> bool:
+    return bool(st.session_state.get(SIDEBAR_COMPACT_KEY, False))
+
+
+def initialize_history(user_id: str = "anonymous_user") -> None:
+    histories = st.session_state.setdefault(HISTORY_BY_USER_KEY, {})
+    _migrate_current_history(histories, user_id)
+
+    st.session_state[CURRENT_USER_KEY] = user_id
+    st.session_state[HISTORY_KEY] = histories.setdefault(user_id, [])
     st.session_state.setdefault(SELECTED_SEARCH_KEY, None)
 
     for item in st.session_state[HISTORY_KEY]:
         item.setdefault("created_at", datetime.now().astimezone().isoformat())
 
 
-def render_history_sidebar() -> None:
+def render_history_sidebar(user_id: str = "anonymous_user") -> None:
     with st.sidebar:
         _render_history_actions()
-        st.caption("ИСТОРИЯ ПОИСКА")
+
+        st.caption(f"История · {user_id}")
         _render_history_groups()
 
 
@@ -34,22 +47,49 @@ def add_search(search: dict) -> None:
     st.session_state[SELECTED_SEARCH_KEY] = search["id"]
 
 
+def update_search(search_id: str, query: str, response: dict) -> None:
+    for item in st.session_state[HISTORY_KEY]:
+        if item["id"] != search_id:
+            continue
+
+        item["query"] = query
+        item["response"] = response
+        item["updated_at"] = datetime.now().astimezone().isoformat()
+        st.session_state[SELECTED_SEARCH_KEY] = search_id
+        return
+
+
 def _render_history_actions() -> None:
-    new_search, clear_history = st.columns([1, 1])
-    if new_search.button("＋ Новый", use_container_width=True):
+    with st.container(key="history_actions"):
+        toggle_column, search_column = st.columns([0.26, 0.74], gap="small")
+        with toggle_column:
+            toggled = st.button(
+                "",
+                icon=_sidebar_toggle_icon(),
+                key="sidebar_toggle",
+                help="Развернуть панель" if is_sidebar_compact() else "Свернуть панель",
+                width="stretch",
+            )
+        with search_column:
+            new_search = st.button(
+                "Новый поиск",
+                icon=":material/add:",
+                width="stretch",
+            )
+
+    if toggled:
+        st.session_state[SIDEBAR_COMPACT_KEY] = not is_sidebar_compact()
+        st.rerun()
+
+    if new_search:
         st.session_state[SELECTED_SEARCH_KEY] = None
         st.rerun()
 
-    with clear_history.popover(
-        "Очистить",
-        disabled=not st.session_state[HISTORY_KEY],
-        use_container_width=True,
-    ):
-        st.caption("Удалить всю историю текущей сессии?")
-        if st.button("Удалить историю", type="primary", use_container_width=True):
-            st.session_state[HISTORY_KEY] = []
-            st.session_state[SELECTED_SEARCH_KEY] = None
-            st.rerun()
+
+def _sidebar_toggle_icon() -> str:
+    if is_sidebar_compact():
+        return ":material/keyboard_double_arrow_right:"
+    return ":material/keyboard_double_arrow_left:"
 
 
 def _render_history_groups() -> None:
@@ -58,34 +98,71 @@ def _render_history_groups() -> None:
         st.caption("Здесь появятся ваши запросы")
         return
 
-    current_group = None
-    for item in reversed(history):
-        group = _date_group(item["created_at"])
-        if group != current_group:
-            st.caption(group)
-            current_group = group
-        _render_history_item(item)
+    for group_date, items in _group_history_by_date(history):
+        with st.expander(
+            _date_group_label(group_date),
+            expanded=_is_today(group_date),
+            icon=":material/calendar_today:",
+        ):
+            for item in items:
+                _render_history_item(item)
 
 
 def _render_history_item(item: dict) -> None:
-    search_button, delete_button = st.columns([0.88, 0.12], gap="small")
     is_selected = item["id"] == st.session_state[SELECTED_SEARCH_KEY]
-    if search_button.button(
-        _history_label(item["query"], item["created_at"], is_selected),
-        key=f"history_{item['id']}",
-        use_container_width=True,
-    ):
+    selected, deleted = _render_history_item_buttons(item, is_selected)
+
+    if selected:
         st.session_state[SELECTED_SEARCH_KEY] = item["id"]
         st.rerun()
 
-    if delete_button.button(
-        "🗑",
-        key=f"delete_{item['id']}",
-        help="Удалить запрос",
-        type="tertiary",
-    ):
+    if deleted:
         _delete_search(item["id"])
         st.rerun()
+
+
+def _render_history_item_buttons(item: dict, is_selected: bool) -> tuple[bool, bool]:
+    item_key = "history_item_selected" if is_selected else "history_item"
+    with st.container(key=f"{item_key}_{item['id']}"):
+        search_button, menu_button = st.columns([0.84, 0.16], gap="small")
+        with search_button:
+            selected = st.button(
+                _history_label(item["query"], item["created_at"]),
+                key=f"history_{item['id']}",
+                width="stretch",
+            )
+        with menu_button:
+            deleted = _render_history_item_menu(item)
+
+    return selected, deleted
+
+
+def _render_history_item_menu(item: dict) -> bool:
+    with st.popover(
+        "...",
+        key=f"chat_menu_{item['id']}",
+        help="Действия с чатом",
+        type="tertiary",
+        width="stretch",
+    ):
+        st.caption("Удалить этот чат?")
+        confirmed = st.checkbox(
+            "Подтвердить удаление",
+            key=f"confirm_delete_{item['id']}",
+        )
+        return st.button(
+            "Удалить чат",
+            key=f"delete_{item['id']}",
+            disabled=not confirmed,
+            type="primary",
+            width="stretch",
+        )
+
+
+def _history_label(query: str, created_at: str) -> str:
+    label = query if len(query) <= 42 else f"{query[:39]}..."
+    time = datetime.fromisoformat(created_at).astimezone().strftime("%H:%M")
+    return f"{time}  {label}"
 
 
 def _delete_search(search_id: str) -> None:
@@ -95,19 +172,35 @@ def _delete_search(search_id: str) -> None:
         st.session_state[SELECTED_SEARCH_KEY] = None
 
 
-def _history_label(query: str, created_at: str, is_selected: bool) -> str:
-    label = query if len(query) <= 30 else f"{query[:27]}..."
-    time = datetime.fromisoformat(created_at).astimezone().strftime("%H:%M")
-    prefix = "› " if is_selected else ""
-    return f"{prefix}{time} · {label}"
+def _migrate_current_history(histories: dict, user_id: str) -> None:
+    current_history = st.session_state.get(HISTORY_KEY)
+    if not current_history or user_id in histories:
+        return
+
+    histories[user_id] = current_history
 
 
-def _date_group(created_at: str) -> str:
-    created_date = datetime.fromisoformat(created_at).astimezone().date()
+def _group_history_by_date(history: list[dict]) -> list[tuple[date, list[dict]]]:
+    groups = defaultdict(list)
+    for item in sorted(history, key=_created_at, reverse=True):
+        groups[_created_at(item).date()].append(item)
+
+    return sorted(groups.items(), key=lambda group: group[0], reverse=True)
+
+
+def _created_at(item: dict) -> datetime:
+    return datetime.fromisoformat(item["created_at"]).astimezone()
+
+
+def _date_group_label(group_date: date) -> str:
     today = datetime.now().astimezone().date()
 
-    if created_date == today:
-        return "Сегодня"
-    if created_date == today - timedelta(days=1):
-        return "Вчера"
-    return "Ранее"
+    if group_date == today:
+        return f"Сегодня · {group_date:%d.%m.%Y}"
+    if group_date == today - timedelta(days=1):
+        return f"Вчера · {group_date:%d.%m.%Y}"
+    return f"{group_date:%d.%m.%Y}"
+
+
+def _is_today(group_date: date) -> bool:
+    return group_date == datetime.now().astimezone().date()
