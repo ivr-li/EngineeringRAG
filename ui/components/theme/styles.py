@@ -11,7 +11,7 @@ APP_UI_STYLES = """
         )
     );
     --text-block-padding-x: 0rem;
-    --question-card-height: 2.25rem;
+    --question-card-height: 2rem;
     --search-input-height: 2.45rem;
     --search-input-button-size: 1.9rem;
     --refine-popover-width: 900px;
@@ -176,6 +176,7 @@ section[data-testid="stSidebar"] + div > div:first-child {
 [data-testid="stChatMessage"]:has([class*="st-key-question_card_"]) {
     margin-bottom: -0.35rem !important;
     padding-bottom: 0 !important;
+    padding-top: 0 !important;
 }
 [data-testid="stChatMessage"]:has([class*="st-key-answer_card_"]) {
     margin-top: 0 !important;
@@ -228,8 +229,7 @@ section[data-testid="stSidebar"] + div > div:first-child {
     box-sizing: border-box;
     display: flex !important;
     justify-content: center !important;
-    margin-left: 0;
-    margin-right: 0;
+    margin: 0 0 0.45rem;
     max-width: none;
     min-height: var(--question-card-height);
     padding: 0 0.95rem !important;
