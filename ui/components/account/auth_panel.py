@@ -14,14 +14,15 @@ def render_auth_panel(user_id: str) -> None:
         width="stretch",
         key="auth_panel",
     ):
-        render_theme_selector(user_id)
+        with st.container(key="auth_panel_content"):
+            render_theme_selector(user_id)
 
-        if user.is_authenticated:
-            _render_profile_state(user.display_name)
-            return
+            if user.is_authenticated:
+                _render_profile_state(user.display_name)
+                return
 
-        if st.button("Войти", type="primary", width="stretch"):
-            _render_login_dialog()
+            if st.button("Войти", type="primary", width="stretch"):
+                _render_login_dialog()
 
 
 def _render_profile_state(display_name: str) -> None:
@@ -37,9 +38,10 @@ def _render_profile_state(display_name: str) -> None:
 
 @st.dialog("Вход", width="small")
 def _render_login_dialog() -> None:
-    _render_login_form()
-    st.divider()
-    _render_register_form()
+    with st.container(key="auth_dialog"):
+        _render_login_form()
+        st.divider()
+        _render_register_form()
 
 
 def _render_login_form() -> None:

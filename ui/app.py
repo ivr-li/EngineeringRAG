@@ -3,15 +3,10 @@ from uuid import uuid4
 
 import requests
 import streamlit as st
-from core.auth import (
-    get_auth_session_id,
-    get_current_user,
-    initialize_auth,
-    render_auth_cookie_sync,
-)
 from components.account.auth_panel import render_auth_panel
 from components.account.history import (
     add_search,
+    clear_selected_search,
     get_selected_search,
     initialize_history,
     is_sidebar_compact,
@@ -27,13 +22,18 @@ from components.theme import (
     initialize_theme,
 )
 from config import UIConfig
+from core.auth import (
+    get_auth_session_id,
+    get_current_user,
+    initialize_auth,
+    render_auth_cookie_sync,
+)
 
 ERROR_KEY = "user_ui_search_error"
 EXAMPLE_QUERIES = (
     "Как располагать стыки рабочей арматуры внахлестку",
     "Из каких материалов можно сделать вертикальный шумозащитный экран",
-    "Какой ширины должна быть противопожарная зона "
-    "на складе лесоматериалов площадью более 18 га",
+    "Сколько действительны результаты ИГИ",
     "Какие грунты нужно динамически испытывать при изысканиях в сейсмическом районе",
 )
 # EXAMPLE_QUERIES = (
@@ -46,8 +46,8 @@ EXAMPLE_QUERIES = (
 
 def main() -> None:
     st.set_page_config(
-        page_title="Поиск по нормативной документации",
-        page_icon="🏗️",
+        page_title="Construction RAG",
+        page_icon="📋",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -63,7 +63,7 @@ def main() -> None:
 
     selected_search = get_selected_search()
     requested_query = _render_content(selected_search)
-    chat_query = st.chat_input("Задайте вопрос по нормативной документации")
+    chat_query = st.chat_input("Введите вопрос...")
 
     if chat_query:
         _search(chat_query)
@@ -73,18 +73,25 @@ def main() -> None:
 
 def _render_content(selected_search: dict | None) -> str | None:
     if selected_search:
-        _render_compact_header()
+        _render_home_navigation()
         return render_search(selected_search)
 
     error_query = _render_search_error()
     return error_query or _render_start_screen()
 
 
-def _render_compact_header() -> None:
-    st.markdown(
-        '<p class="compact-title">Поиск по нормативной документации</p>',
-        unsafe_allow_html=True,
+def _render_home_navigation() -> None:
+    clicked = st.button(
+        "Главная",
+        icon=":material/arrow_back:",
+        key="result_home_link",
+        type="tertiary",
+        width="content",
     )
+
+    if clicked:
+        clear_selected_search()
+        st.rerun()
 
 
 def _render_start_screen() -> str | None:
@@ -158,7 +165,7 @@ def _search(query: str, search_id: str | None = None) -> None:
 
 def _request_search(query: str) -> dict:
     user = get_current_user()
-    with st.status("Обрабатываем запрос...", expanded=True) as status:
+    with st.status("Ищу в документации...", expanded=True) as status:
         st.write("Передали вопрос поисковому сервису")
         response = RetrieverClient().search(
             query=query,

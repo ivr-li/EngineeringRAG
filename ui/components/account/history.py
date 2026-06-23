@@ -40,7 +40,7 @@ def render_history_sidebar(user_id: str = "anonymous_user") -> None:
     with st.sidebar:
         _render_history_actions()
 
-        st.caption(f"История · {user_id}")
+        st.caption("История")
         _render_history_error()
         _render_history_groups()
 
@@ -51,6 +51,10 @@ def get_selected_search() -> dict | None:
         (item for item in st.session_state[HISTORY_KEY] if item["id"] == selected_id),
         None,
     )
+
+
+def clear_selected_search() -> None:
+    st.session_state[SELECTED_SEARCH_KEY] = None
 
 
 def add_search(search: dict) -> None:
@@ -89,8 +93,9 @@ def _render_history_actions() -> None:
             )
         with search_column:
             new_search = st.button(
-                "Новый поиск",
+                "Новый",
                 icon=":material/add:",
+                key="new_search",
                 width="stretch",
             )
 
@@ -99,7 +104,7 @@ def _render_history_actions() -> None:
         st.rerun()
 
     if new_search:
-        st.session_state[SELECTED_SEARCH_KEY] = None
+        clear_selected_search()
         st.rerun()
 
 
@@ -161,14 +166,9 @@ def _render_history_item_menu(item: dict) -> bool:
         width="content",
     ):
         st.caption("Удалить этот чат?")
-        confirmed = st.checkbox(
-            "Подтвердить удаление",
-            key=f"confirm_delete_{item['id']}",
-        )
         return st.button(
             "Удалить чат",
             key=f"delete_{item['id']}",
-            disabled=not confirmed,
             type="primary",
             width="stretch",
         )

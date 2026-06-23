@@ -1,10 +1,23 @@
 APP_UI_STYLES = """
 <style>
 :root {
+    /* Main layout knobs. Increase offset to make the block narrower. */
+    --text-block-side-offset: clamp(1rem, 24vw, 28rem);
+    --text-block-width: min(
+        100%,
+        max(
+            20rem,
+            calc(100% - var(--text-block-side-offset) - var(--text-block-side-offset))
+        )
+    );
+    --text-block-padding-x: 0rem;
+    --search-input-height: 2.45rem;
+    --search-input-button-size: 1.9rem;
     --refine-popover-width: 900px;
     --sidebar-width: 15rem;
 }
 #MainMenu,
+footer,
 [data-testid="stDeployButton"],
 [data-testid="stDecoration"],
 button[title="Deploy"] {
@@ -27,17 +40,32 @@ header[data-testid="stHeader"],
     background: var(--app-bg);
     color: var(--app-text);
 }
+.block-container,
 .main .block-container {
-    max-width: 980px;
-    padding-top: 3.2rem;
-    padding-bottom: 7rem;
+    box-sizing: border-box;
+    max-width: none !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding-left: var(--text-block-padding-x) !important;
+    padding-right: var(--text-block-padding-x) !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0 !important;
+    width: var(--text-block-width) !important;
+}
+section[data-testid="stSidebar"] + div > div:first-child {
+    padding-top: 0.5rem !important;
 }
 .st-key-start_screen {
-    padding-top: min(4vh, 2.5rem);
+    padding-top: 0;
 }
 .st-key-start_screen h1 {
     margin-bottom: 0.6rem;
     color: var(--app-text);
+}
+.st-key-start_screen .stButton > button {
+    align-items: center;
+    min-height: 60px;
+    white-space: normal;
 }
 .st-key-start_screen h4,
 [data-testid="stMarkdownContainer"] h1,
@@ -49,14 +77,19 @@ header[data-testid="stHeader"],
 .st-key-start_screen [data-testid="stMarkdownContainer"] p {
     color: var(--app-muted);
 }
-.compact-title {
-    color: var(--app-muted);
-    font-size: 0.9rem;
-    margin-bottom: 1.5rem;
+[class*="st-key-result_home_link"] button {
+    border: 0 !important;
+    background: transparent !important;
+    color: var(--app-muted) !important;
+    padding: 0.2rem 0 !important;
+}
+[class*="st-key-result_home_link"] button:hover {
+    color: var(--app-accent) !important;
 }
 .st-key-response-actions {
     width: 100%;
     margin-top: 0.25rem;
+    margin-bottom: 6.5rem;
     gap: 0.6rem;
 }
 .st-key-response-actions [data-testid="stHorizontalBlock"] {
@@ -135,11 +168,42 @@ header[data-testid="stHeader"],
 [data-testid="stChatMessage"] {
     background: transparent;
     color: var(--app-text);
+    margin: 0 !important;
+    padding: 0.15rem 0 !important;
+    position: relative;
+}
+[data-testid="stChatMessage"]:has([class*="st-key-question_card_"]) {
+    margin-bottom: -0.35rem !important;
+    padding-bottom: 0 !important;
+}
+[data-testid="stChatMessage"]:has([class*="st-key-answer_card_"]) {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+}
+[data-testid="stChatMessage"]:has([class*="st-key-answer_card_"]) > div:last-child,
+[data-testid="stChatMessage"]:has([class*="st-key-answer_card_"])
+[data-testid="stVerticalBlock"] {
+    max-width: 100% !important;
+    width: 100% !important;
 }
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p,
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li {
     color: var(--app-text);
+}
+@media (min-width: 900px) {
+    [data-testid="stChatMessage"] > div:first-child {
+        left: -3rem;
+        position: absolute !important;
+        top: 0.15rem;
+        z-index: 1;
+    }
+
+    [data-testid="stChatMessage"] > div:last-child {
+        margin-left: 0 !important;
+        max-width: 100% !important;
+        width: 100% !important;
+    }
 }
 [class*="st-key-answer_card_"],
 [class*="st-key-question_card_"] {
@@ -154,6 +218,8 @@ header[data-testid="stHeader"],
 }
 [class*="st-key-answer_card_"] {
     border-left: 3px solid var(--app-accent);
+    box-sizing: border-box;
+    width: 100%;
 }
 [class*="st-key-question_card_"] {
     align-items: center;
@@ -197,7 +263,8 @@ header[data-testid="stHeader"],
     border-collapse: collapse;
     color: var(--app-text);
     max-width: 100%;
-    width: max-content;
+    table-layout: auto;
+    width: 100%;
 }
 [class*="st-key-answer_card_"] [data-testid="stMarkdownContainer"]:has(table) {
     overflow-x: auto;
@@ -213,6 +280,21 @@ header[data-testid="stHeader"],
 }
 [class*="st-key-answer_card_"] tbody tr:nth-child(even) {
     background: var(--app-bg);
+}
+[class*="st-key-answer_card_"] hr {
+    border: 0;
+    border-top: 1px solid var(--app-border);
+    margin: 0.95rem 0 0.75rem;
+}
+[class*="st-key-answer_card_"] blockquote {
+    background: rgba(240, 165, 0, 0.12);
+    border-left: 3px solid #f0a500;
+    color: var(--app-text);
+    margin: 0.6rem 0;
+    padding: 0.65rem 0.8rem;
+}
+[class*="st-key-answer_card_"] blockquote p {
+    color: var(--app-text) !important;
 }
 [data-testid="stExpander"] {
     border-color: var(--app-border);
@@ -249,12 +331,19 @@ header[data-testid="stHeader"],
 [class*="st-key-sources_panel_"] [data-testid="stDivider"] hr {
     border-color: var(--app-border);
 }
+[class*="st-key-sources_panel_"] [data-testid="stDataFrame"],
+[class*="st-key-sources_panel_"] table {
+    width: 100% !important;
+}
 [class*="st-key-sources_panel_"] [data-testid="stCodeBlock"],
 [class*="st-key-sources_panel_"] pre,
 [class*="st-key-sources_panel_"] code {
     background: var(--app-input-bg) !important;
     border-color: var(--app-border) !important;
     color: var(--app-text) !important;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap !important;
 }
 [data-testid="stSelectbox"] label,
 [data-testid="stTextInput"] label {
@@ -303,6 +392,21 @@ header[data-testid="stHeader"],
     min-height: 2rem !important;
     padding-bottom: 0 !important;
     padding-top: 0 !important;
+    white-space: nowrap !important;
+}
+[data-testid="stSidebar"] [class*="st-key-new_search"] button {
+    background: var(--app-surface) !important;
+    border: 1px solid var(--app-border) !important;
+    color: var(--app-text) !important;
+    justify-content: center !important;
+    white-space: nowrap !important;
+}
+[data-testid="stSidebar"] [class*="st-key-new_search"] button:hover {
+    background: var(--app-accent-soft) !important;
+    border-color: var(--app-accent) !important;
+}
+[data-testid="stSidebar"] [class*="st-key-new_search"] button p {
+    white-space: nowrap !important;
 }
 [data-testid="stSidebar"] [class*="st-key-sidebar_toggle"] button {
     background: transparent !important;
@@ -325,6 +429,11 @@ header[data-testid="stHeader"],
 [data-testid="stSidebar"] [class*="st-key-history_item_selected_"] {
     margin: 0;
     position: relative;
+}
+[data-testid="stSidebar"] [class*="st-key-history_item_selected_"] {
+    background: rgba(200, 168, 90, 0.16);
+    border-left: 3px solid #c8a85a;
+    border-radius: 0.45rem;
 }
 [data-testid="stSidebar"] [class*="st-key-history_item_"]
 [data-testid="stHorizontalBlock"],
@@ -480,22 +589,72 @@ header[data-testid="stHeader"],
     color: var(--app-muted);
     font-size: 0.8rem;
 }
+[data-testid="stSidebar"] [class*="st-key-auth_panel"] button {
+    align-items: center !important;
+    background: var(--app-surface) !important;
+    border: 1px solid var(--app-border) !important;
+    color: var(--app-text) !important;
+    justify-content: center !important;
+}
+[data-testid="stSidebar"] [class*="st-key-auth_panel"] button:hover {
+    background: var(--app-accent-soft) !important;
+    border-color: var(--app-accent) !important;
+}
+[data-testid="stSidebar"] [class*="st-key-auth_panel"] button svg,
+[data-testid="stSidebar"] [class*="st-key-auth_panel"] button p {
+    color: var(--app-text) !important;
+    fill: var(--app-text) !important;
+}
 [data-testid="stChatInput"] {
-    max-width: 980px;
-    margin: 0 auto;
+    box-sizing: border-box;
+    max-width: none !important;
+    min-height: var(--search-input-height) !important;
+    width: 100% !important;
     background: var(--app-input-bg);
     border: 1px solid var(--app-border);
     border-radius: 0.6rem;
     box-shadow: none;
 }
+[data-testid="stBottom"] {
+    box-sizing: border-box;
+    left: 0 !important;
+    max-width: none !important;
+    right: 0 !important;
+    transform: none !important;
+    width: 100% !important;
+}
+[data-testid="stBottomBlockContainer"] {
+    box-sizing: border-box;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    max-width: none !important;
+    padding-left: var(--text-block-padding-x) !important;
+    padding-right: var(--text-block-padding-x) !important;
+    width: var(--text-block-width) !important;
+}
+[data-testid="stBottom"] > div,
+div[data-testid="stChatInputContainer"],
+section.main > div > div:last-child {
+    box-sizing: border-box;
+    max-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    width: 100% !important;
+}
 [data-testid="stChatInput"] > div {
     background: transparent;
+    min-height: var(--search-input-height) !important;
 }
 [data-testid="stChatInput"] textarea,
 [data-testid="stChatInput"] textarea:focus {
     background: var(--app-input-bg);
     color: var(--app-text);
     caret-color: var(--app-accent);
+    min-height: var(--search-input-height) !important;
+    overflow: hidden;
+    padding-bottom: 0.35rem !important;
+    padding-top: 0.35rem !important;
+    text-overflow: ellipsis;
 }
 [data-testid="stChatInput"] textarea::placeholder,
 [data-testid="stTextInput"] input::placeholder {
@@ -505,6 +664,10 @@ header[data-testid="stHeader"],
     background: var(--app-accent-soft);
     color: var(--app-accent);
     border-radius: 0.45rem;
+    height: var(--search-input-button-size) !important;
+    min-height: var(--search-input-button-size) !important;
+    min-width: var(--search-input-button-size) !important;
+    width: var(--search-input-button-size) !important;
 }
 [data-testid="stChatInput"] button svg {
     color: var(--app-accent);
@@ -557,6 +720,108 @@ div[data-baseweb="popover"]:has([data-testid="stForm"])
 div[data-baseweb="popover"]:has([data-testid="stForm"])
 [data-testid="stForm"] p {
     color: var(--app-text);
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) {
+    background: var(--app-surface) !important;
+    border: 1px solid var(--app-border) !important;
+    color: var(--app-text) !important;
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) > div,
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) > div > div {
+    background: var(--app-surface) !important;
+    color: var(--app-text) !important;
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) label,
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) p,
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) span {
+    color: var(--app-text) !important;
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"])
+[data-testid="stCaptionContainer"] {
+    color: var(--app-muted) !important;
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"])
+[data-baseweb="select"] > div {
+    background: var(--app-input-bg) !important;
+    border-color: var(--app-border) !important;
+    color: var(--app-text) !important;
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) button {
+    background: var(--app-surface) !important;
+    border: 1px solid var(--app-border) !important;
+    color: var(--app-text) !important;
+}
+div[data-baseweb="popover"]:has([class*="st-key-auth_panel_content"]) button:hover {
+    background: var(--app-accent-soft) !important;
+    border-color: var(--app-accent) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"]),
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) > div {
+    background: var(--app-surface) !important;
+    border-color: var(--app-border) !important;
+    color: var(--app-text) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) h1,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) h2,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) h3,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) label,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) p,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) span {
+    color: var(--app-text) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stTextInput"] input {
+    background: var(--app-input-bg) !important;
+    border-color: var(--app-border) !important;
+    color: var(--app-text) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stTextInput"] input::placeholder {
+    color: var(--app-muted) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stDivider"] hr {
+    border-color: var(--app-border) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stExpander"] {
+    background: var(--app-surface) !important;
+    border: 1px solid var(--app-border) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stExpander"] details,
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stExpander"] summary {
+    background: var(--app-surface) !important;
+    color: var(--app-text) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stExpander"] summary:hover {
+    background: var(--app-accent-soft) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stExpander"] svg {
+    color: var(--app-text) !important;
+    fill: var(--app-text) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stFormSubmitButton"] button,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) .stButton > button {
+    background: var(--app-surface) !important;
+    border: 1px solid var(--app-border) !important;
+    color: var(--app-text) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stFormSubmitButton"] button:hover,
+div[role="dialog"]:has([class*="st-key-auth_dialog"]) .stButton > button:hover {
+    background: var(--app-accent-soft) !important;
+    border-color: var(--app-accent) !important;
+}
+div[role="dialog"]:has([class*="st-key-auth_dialog"])
+[data-testid="stFormSubmitButton"] button[kind="primary"] {
+    background: var(--app-accent) !important;
+    border-color: var(--app-accent) !important;
+    color: var(--app-primary-text) !important;
 }
 </style>
 """
