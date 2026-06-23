@@ -130,7 +130,7 @@ def _is_authenticated_user(user_id: str) -> bool:
 
 
 def build_sidebar_layout_css(is_compact: bool) -> str:
-    width = "4.25rem" if is_compact else "15rem"
+    width = "5rem" if is_compact else "20rem"
     compact_css = SIDEBAR_COMPACT_CSS if is_compact else ""
     return f"""
 <style>

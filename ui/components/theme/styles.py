@@ -14,7 +14,7 @@ APP_UI_STYLES = """
     --search-input-height: 2.45rem;
     --search-input-button-size: 1.9rem;
     --refine-popover-width: 900px;
-    --sidebar-width: 15rem;
+    --sidebar-width: 20rem;
 }
 #MainMenu,
 footer,
@@ -224,21 +224,50 @@ section[data-testid="stSidebar"] + div > div:first-child {
 [class*="st-key-question_card_"] {
     align-items: center;
     background: var(--app-accent-soft);
-    display: flex;
+    box-sizing: border-box;
+    display: grid;
+    justify-content: center;
     margin-left: 0;
-    margin-right: auto;
-    max-width: min(760px, 100%);
+    margin-right: 0;
+    max-width: none;
     min-height: 2.6rem;
+    padding: 0 0.95rem !important;
+    place-items: center;
+    width: 100%;
+}
+[class*="st-key-question_card_"] [data-testid="stVerticalBlock"] {
+    align-items: center;
+    display: grid;
+    justify-content: center;
+    min-height: 2.6rem;
+    place-items: center;
+    width: 100%;
+}
+[class*="st-key-question_card_"] [data-testid="stElementContainer"] {
+    align-items: center;
+    display: grid;
+    justify-content: center;
+    min-height: 2.6rem;
+    place-items: center;
+    width: 100%;
 }
 [class*="st-key-question_card_"] [data-testid="stMarkdownContainer"] {
     align-items: center;
-    display: flex;
-    min-height: 100%;
+    display: grid;
+    justify-content: center;
+    min-height: 2.6rem;
+    place-items: center;
+    text-align: center;
     width: 100%;
 }
 [class*="st-key-question_card_"] [data-testid="stMarkdownContainer"] p {
-    line-height: 1.35;
+    align-items: center;
+    display: flex;
+    justify-content: center;
+    line-height: 1.2;
     margin: 0 !important;
+    padding: 0 !important;
+    transform: translateY(-0.05rem);
 }
 [class*="st-key-answer_card_"] [data-testid="stMarkdownContainer"] p:first-child,
 [class*="st-key-question_card_"] [data-testid="stMarkdownContainer"] p:first-child {
