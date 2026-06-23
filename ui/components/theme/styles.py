@@ -11,6 +11,7 @@ APP_UI_STYLES = """
         )
     );
     --text-block-padding-x: 0rem;
+    --question-card-height: 2.25rem;
     --search-input-height: 2.45rem;
     --search-input-button-size: 1.9rem;
     --refine-popover-width: 900px;
@@ -222,52 +223,56 @@ section[data-testid="stSidebar"] + div > div:first-child {
     width: 100%;
 }
 [class*="st-key-question_card_"] {
-    align-items: center;
+    align-items: center !important;
     background: var(--app-accent-soft);
     box-sizing: border-box;
-    display: grid;
-    justify-content: center;
+    display: flex !important;
+    justify-content: center !important;
     margin-left: 0;
     margin-right: 0;
     max-width: none;
-    min-height: 2.6rem;
+    min-height: var(--question-card-height);
     padding: 0 0.95rem !important;
-    place-items: center;
+    width: 100%;
+}
+[class*="st-key-question_card_"] > div {
+    align-items: center !important;
+    display: flex !important;
+    justify-content: center !important;
+    min-height: var(--question-card-height);
     width: 100%;
 }
 [class*="st-key-question_card_"] [data-testid="stVerticalBlock"] {
-    align-items: center;
-    display: grid;
-    justify-content: center;
-    min-height: 2.6rem;
-    place-items: center;
+    align-items: center !important;
+    display: flex !important;
+    justify-content: center !important;
+    min-height: var(--question-card-height);
     width: 100%;
 }
 [class*="st-key-question_card_"] [data-testid="stElementContainer"] {
-    align-items: center;
-    display: grid;
-    justify-content: center;
-    min-height: 2.6rem;
-    place-items: center;
+    align-items: center !important;
+    display: flex !important;
+    justify-content: center !important;
+    min-height: var(--question-card-height);
     width: 100%;
 }
-[class*="st-key-question_card_"] [data-testid="stMarkdownContainer"] {
-    align-items: center;
-    display: grid;
-    justify-content: center;
-    min-height: 2.6rem;
-    place-items: center;
+[class*="st-key-question_card_"] [data-testid="stHtml"] {
+    align-items: center !important;
+    display: flex !important;
+    justify-content: center !important;
+    min-height: var(--question-card-height);
+    width: 100%;
+}
+.question-card-text {
+    align-items: center !important;
+    display: flex !important;
+    justify-content: center !important;
+    line-height: 1 !important;
+    margin: 0 !important;
+    min-height: var(--question-card-height);
+    padding: 0 !important;
     text-align: center;
     width: 100%;
-}
-[class*="st-key-question_card_"] [data-testid="stMarkdownContainer"] p {
-    align-items: center;
-    display: flex;
-    justify-content: center;
-    line-height: 1.2;
-    margin: 0 !important;
-    padding: 0 !important;
-    transform: translateY(-0.05rem);
 }
 [class*="st-key-answer_card_"] [data-testid="stMarkdownContainer"] p:first-child,
 [class*="st-key-question_card_"] [data-testid="stMarkdownContainer"] p:first-child {

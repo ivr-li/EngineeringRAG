@@ -1,6 +1,7 @@
 import base64
 import re
 import textwrap
+from html import escape
 
 import streamlit as st
 from shared.logging.feedback_logger import log_feedback
@@ -178,7 +179,8 @@ def _unique_headers(headers: list[str]) -> list[str]:
 
 def _render_question(search: dict) -> None:
     with st.container(key=f"question_card_{search['id']}"):
-        st.markdown(search["query"])
+        query = escape(search["query"])
+        st.html(f'<div class="question-card-text">{query}</div>')
 
 
 def _render_answer_header(answer: str, search_id: str) -> None:
