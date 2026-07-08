@@ -97,9 +97,11 @@ def _render_home_navigation() -> None:
 def _render_start_screen() -> str | None:
     with st.container(key="start_screen"):
         st.title("Поиск по нормативной документации")
-        st.markdown(
-            "Получите ответ по строительным нормам с указанием найденных документов "
-            "и разделов. Каждый запрос создаёт отдельную запись в истории."
+        st.info(
+            "Это сервис поиска ответов по нормативной документации, а не чат-бот который у всех на слуху(пока). "
+            "Он ищет подтверждение в загруженных нормах и возвращает ответ с найденными источниками. "
+            "Сервис не выполняет расчёты с нуля, не проектирует решения и не заменяет инженерную проверку."
+            "Лучше всего он подходит для поиска требований, ограничений, сроков, условий применения и ссылок на конкретные разделы документов."
         )
         st.markdown("#### Примеры вопросов")
 
@@ -108,8 +110,8 @@ def _render_start_screen() -> str | None:
             if selected:
                 return selected
 
-        st.info(
-            "Старайтесь формулировать вопрос конкретно: укажите конструкцию, "
+        st.markdown(
+            "> Старайтесь формулировать вопрос конкретно: укажите конструкцию, "
             "материал, параметр и т.п. На общий вопрос вы получите общий ответ."
         )
     return None
@@ -143,6 +145,7 @@ def _search(query: str, search_id: str | None = None) -> None:
     try:
         response = _request_search(query)
     except requests.RequestException as error:
+        st.toast("Не удалось получить ответ", icon=":material/error:", duration="long")
         st.session_state[ERROR_KEY] = {"query": query, "details": str(error)}
         st.rerun()
         return
@@ -165,21 +168,19 @@ def _search(query: str, search_id: str | None = None) -> None:
 
 def _request_search(query: str) -> dict:
     user = get_current_user()
-    with st.status("Ищу в документации...", expanded=True) as status:
-        st.write("Передали вопрос поисковому сервису")
-        response = RetrieverClient().search(
-            query=query,
-            user_id=user.user_id if user.is_authenticated else None,
-            session_id=get_auth_session_id(),
-            rewrite_system_prompt=UIConfig.REWRITE_SYSTEM_PROMPT,
-            compose_system_prompt=UIConfig.ANSWER_SYSTEM_PROMPT,
-            top_k=4,
-            prefetch_k=40,
-            mode="hybrid",
-        )
+    st.toast("Поиск запущен", icon="spinner", duration="long")
+    response = RetrieverClient().search(
+        query=query,
+        user_id=user.user_id if user.is_authenticated else None,
+        session_id=get_auth_session_id(),
+        rewrite_system_prompt=UIConfig.REWRITE_SYSTEM_PROMPT,
+        compose_system_prompt=UIConfig.ANSWER_SYSTEM_PROMPT,
+        top_k=4,
+        prefetch_k=40,
+        mode="hybrid",
+    )
+    st.toast("Ответ готов", icon=":material/check:", duration="short")
 
-        st.write("Проверяем полученные источники")
-        status.update(label="Ответ готов", state="complete", expanded=False)
     return response
 
 
