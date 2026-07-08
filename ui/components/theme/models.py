@@ -86,3 +86,5 @@ THEMES = {
         input_bg="#f0f5ef",
     ),
 }
+
+THEME_ORDER = ("light", "dark", "engineering", "graphite", "green")

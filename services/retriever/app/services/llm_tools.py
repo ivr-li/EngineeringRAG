@@ -1,3 +1,5 @@
+import re
+
 import structlog
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
@@ -7,6 +9,26 @@ from app.schemas import LLMConfig, RetrievalResult
 from app.services.context_packer import PackedContext, build_packed_context
 
 log = structlog.get_logger(__name__)
+_WORD_RE = re.compile(r"[а-яёa-z0-9][а-яёa-z0-9.\-]*", re.IGNORECASE)
+_COVERAGE_STOP_TERMS = {
+    "какие",
+    "какой",
+    "какая",
+    "какое",
+    "требования",
+    "требование",
+    "предъявляются",
+    "предъявлять",
+    "нужно",
+    "нужны",
+    "должен",
+    "должна",
+    "должно",
+    "должны",
+    "можно",
+    "норматив",
+    "нормы",
+}
 
 
 async def _call_llm(
@@ -117,10 +139,12 @@ def _build_static_prompt(
     results: list[RetrievalResult],
 ) -> str:
     usage_rules = _context_usage_rules(results)
+    coverage_note = _query_coverage_note(query, results)
 
     return (
         f"Исходный запрос пользователя:\n{query}\n\n"
         f"Поисковый запрос после переформулирования:\n{effective_query}\n\n"
+        f"Проверка покрытия исходного вопроса:\n{coverage_note}\n\n"
         f"Правила использования найденного контекста:\n{usage_rules}"
     )
 
@@ -181,6 +205,8 @@ def _build_context(results: list[RetrievalResult]) -> str:
 
 def _context_usage_rules(results: list[RetrievalResult]) -> str:
     rules = [
+        "- Сначала проверь, подтверждают ли найденные фрагменты полный исходный вопрос, а не только отдельные слова или условия.",
+        "- Если контекст покрывает только часть вопроса, не формируй прямой ответ по совпавшей части; прямо укажи, чего нет в источниках.",
         "- Фрагменты, подтянутые по внутренней ссылке, являются обязательным контекстом.",
         "- Если текст ссылается на таблицу и таблица есть в контексте, извлеки из нее конкретные значения.",
         "- Не отвечай только фразой, что значения указаны в таблице, если строки таблицы переданы ниже.",
@@ -193,6 +219,131 @@ def _context_usage_rules(results: list[RetrievalResult]) -> str:
             '"Что удалось найти".'
         )
     return "\n".join(rules)
+
+
+def _query_coverage_note(query: str, results: list[RetrievalResult]) -> str:
+    terms = _coverage_terms(query)
+    if not terms:
+        return "Ключевые термины исходного вопроса не выделены."
+
+    context_keys = _context_term_keys(results)
+    missing = [
+        term for term in terms if not _is_term_covered(_term_key(term), context_keys)
+    ]
+
+    if not missing:
+        return "Все ключевые термины исходного вопроса встречаются в контексте."
+
+    missing_terms = ", ".join(missing)
+    return (
+        f"В контексте не найдены ключевые термины: {missing_terms}. "
+        "Если они относятся к основному объекту или действию вопроса, ответь, "
+        "что в найденных источниках нет достаточных данных для прямого ответа."
+    )
+
+
+def _coverage_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    for raw in _WORD_RE.findall(text.lower()):
+        term = raw.strip(".-")
+        key = _term_key(term)
+        if _is_coverage_term(term, key) and key not in seen:
+            terms.append(term)
+            seen.add(key)
+
+    return terms
+
+
+def _context_term_keys(results: list[RetrievalResult]) -> set[str]:
+    context = " ".join(_result_search_text(result) for result in results).lower()
+    return {_term_key(raw.strip(".-")) for raw in _WORD_RE.findall(context)}
+
+
+def _result_search_text(result: RetrievalResult) -> str:
+    return " ".join(
+        [
+            result.text,
+            result.filename,
+            result.section_path,
+            result.parent_heading or "",
+            result.leaf_heading or "",
+        ]
+    )
+
+
+def _is_coverage_term(term: str, key: str) -> bool:
+    if not key or term in _COVERAGE_STOP_TERMS:
+        return False
+
+    return any(ch.isdigit() for ch in term) or len(key) >= 4
+
+
+def _is_term_covered(key: str, context_keys: set[str]) -> bool:
+    if key in context_keys:
+        return True
+
+    if len(key) < 5:
+        return False
+
+    prefix = key[:5]
+    return any(context_key.startswith(prefix) for context_key in context_keys)
+
+
+def _term_key(term: str) -> str:
+    if any(ch.isdigit() for ch in term):
+        return term
+
+    for suffix in _TERM_SUFFIXES:
+        if len(term) > len(suffix) + 3 and term.endswith(suffix):
+            return term[: -len(suffix)]
+
+    return term
+
+
+_TERM_SUFFIXES = (
+    "овать",
+    "ировать",
+    "аться",
+    "яться",
+    "ыми",
+    "ими",
+    "ого",
+    "ему",
+    "ами",
+    "ями",
+    "иях",
+    "ых",
+    "их",
+    "ом",
+    "ем",
+    "ой",
+    "ый",
+    "ий",
+    "ая",
+    "ое",
+    "ые",
+    "ие",
+    "ов",
+    "ев",
+    "ей",
+    "ам",
+    "ям",
+    "ах",
+    "ях",
+    "ать",
+    "ять",
+    "ить",
+    "еть",
+    "а",
+    "я",
+    "ы",
+    "и",
+    "е",
+    "у",
+    "ю",
+)
 
 
 def _fallback_answer(results: list[RetrievalResult]) -> str:

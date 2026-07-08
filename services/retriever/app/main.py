@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import os
 
 import structlog
 from dotenv import load_dotenv
@@ -32,13 +33,25 @@ from app.services import (
 log = structlog.get_logger(__name__)
 load_dotenv()
 retriever = QdrantRetriever()
+OPENAI_COMPATIBLE_API_KEY = os.getenv("OPENAI_API_KEY") or "EMPTY"
 llm_client = OpenAI(
     base_url=LLMConfig.REWRITER_BASE_URL,
-    api_key="",
+    api_key=OPENAI_COMPATIBLE_API_KEY,
     timeout=120,
 )
 
 trace_logger: TraceLogger
+
+RETRIEVER_DATABASE_URL = os.getenv(
+    "RETRIEVER_DATABASE_URL",
+    "postgresql+asyncpg://app_user:app_password@localhost:5432/app_db",
+)
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
+TRACE_BUCKET_NAME = os.getenv("TRACE_BUCKET_NAME", "ragfiles")
+TRACE_PREFIX = os.getenv("TRACE_PREFIX", "dev_data/logs/query-traces")
 
 
 def _apply_pipeline_trace(trace: QueryTrace, result: PipelineResult) -> None:
@@ -66,21 +79,18 @@ def _apply_pipeline_trace(trace: QueryTrace, result: PipelineResult) -> None:
 async def lifespan(app: FastAPI):
     global trace_logger
     minio_client = Minio(
-        endpoint="localhost:9000",
-        access_key="minioadmin",
-        secret_key="minioadmin",
-        secure=False,
+        endpoint=MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=MINIO_SECURE,
     )
-    engine = create_async_engine(
-        "postgresql+asyncpg://app_user:app_password@localhost:5432/app_db",
-        pool_pre_ping=True,
-    )
+    engine = create_async_engine(RETRIEVER_DATABASE_URL, pool_pre_ping=True)
 
     trace_logger = TraceLogger(
         minio_logger=MinioTraceLogger(
             client=minio_client,
-            bucket_name="ragfiles",
-            prefix="/dev_data/logs/query-traces",
+            bucket_name=TRACE_BUCKET_NAME,
+            prefix=TRACE_PREFIX,
         ),
         trace_repository=PGTraceLogger(engine),
     )
@@ -111,6 +121,8 @@ async def root():
 async def search(request: SearchRequest = Body(..., description="Search parameters")):
     trace = QueryTrace(
         query=request.query,
+        user_id=request.user_id,
+        session_id=request.session_id,
         search_mode=request.mode,
         top_k=request.top_k,
         prefetch_k=request.prefetch_k,

@@ -1,3 +1,4 @@
+import os
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from time import perf_counter
@@ -8,11 +9,11 @@ from pydantic import BaseModel, Field
 
 
 class LLMConfig:
-    REWRITER_BASE_URL = "http://localhost:8020/v1"
-    REWRITER_MODEL = "query-rewriter"
+    REWRITER_BASE_URL = os.getenv("REWRITER_BASE_URL", "http://vllm-light:8020/v1")
+    REWRITER_MODEL = os.getenv("REWRITER_MODEL", "query-rewriter")
 
-    ANSWER_BASE_URL = REWRITER_BASE_URL
-    ANSWER_MODEL = REWRITER_MODEL
+    ANSWER_BASE_URL = os.getenv("ANSWER_BASE_URL", REWRITER_BASE_URL)
+    ANSWER_MODEL = os.getenv("ANSWER_MODEL", REWRITER_MODEL)
     ANSWER_CONTEXT_LIMIT = 6
     ANSWER_CONTEXT_HARD_LIMIT = 24
     ANSWER_MODEL_CONTEXT_TOKENS = 10000
@@ -105,6 +106,8 @@ class QueryTrace(BaseModel):
     query_id: str = Field(default_factory=lambda: str(uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     query: str
+    user_id: str | None = None
+    session_id: str | None = None
     rewritten_query: str | None = None
     search_mode: str
     top_k: int

@@ -54,14 +54,6 @@ x-vllm-common: &vllm-common
                       capabilities: [gpu]
 
 services:
-    # retriever_api:
-    #     build:
-    #         context: .
-    #         dockerfile: services/retriever/Dockerfile
-    #     container_name: retriever_api
-    #     restart: unless-stopped
-    #     ports:
-    #         - "9123:9123"
     postgres:
         image: postgres:18
         container_name: postgres
@@ -74,6 +66,11 @@ services:
             - "5432:5432"
         volumes:
             - ./data/postgres:/var/lib/postgresql
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U app_user -d app_db"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
     pgadmin:
         image: dpage/pgadmin4:9.15.0
@@ -88,6 +85,81 @@ services:
             - ./data/pgadmin:/var/lib/pgadmin
         depends_on:
             - postgres
+
+    user_api:
+        build:
+            context: .
+            dockerfile: services/user_api/Dockerfile
+        container_name: user_api
+        restart: unless-stopped
+        environment:
+            USER_API_DATABASE_URL: >-
+                postgresql+asyncpg://app_user:app_password@postgres:5432/app_db
+            USER_API_SESSION_TTL_DAYS: 30
+        ports:
+            - "9130:9130"
+        depends_on:
+            postgres:
+                condition: service_healthy
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - >-
+                    python -c "import urllib.request as u;
+                    u.urlopen('http://localhost:9130/health').read()"
+            interval: 15s
+            timeout: 5s
+            retries: 5
+
+    retriever_api:
+        build:
+            context: .
+            dockerfile: services/retriever/Dockerfile
+        container_name: retriever_api
+        restart: unless-stopped
+        environment:
+            RETRIEVER_DATABASE_URL: >-
+                postgresql+asyncpg://app_user:app_password@postgres:5432/app_db
+            QDRANT_URL: http://qdrant:6333
+            REWRITER_BASE_URL: http://vllm-light:8000/v1
+            ANSWER_BASE_URL: http://vllm-light:8000/v1
+            BGE_M3_CACHE_DIR: /root/.cache/huggingface/hub
+            MINIO_ENDPOINT: minio:9000
+            MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+            MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+            MINIO_SECURE: "false"
+            TRACE_BUCKET_NAME: ragfiles
+            TRACE_PREFIX: dev_data/logs/query-traces
+        ports:
+            - "9123:9123"
+        volumes:
+            - ./data/huggingface_cache:/root/.cache/huggingface
+        depends_on:
+            postgres:
+                condition: service_healthy
+            minio:
+                condition: service_healthy
+            qdrant:
+                condition: service_started
+            vllm-light:
+                condition: service_healthy
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - >-
+                    python -c "import urllib.request as u;
+                    u.urlopen('http://localhost:9123/he').read()"
+            interval: 30s
+            timeout: 10s
+            retries: 5
+            start_period: 120s
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - driver: nvidia
+                          device_ids: ["0"]
+                          capabilities: [gpu]
 
     vllm-light:
         <<: *vllm-common
@@ -117,8 +189,8 @@ services:
             test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
             interval: 15s
             timeout: 10s
-            retries: 10
-            start_period: 120s
+            retries: 20
+            start_period: 300s
 
     docling-serve:
         image: quay.io/docling-project/docling-serve-cu130:main
