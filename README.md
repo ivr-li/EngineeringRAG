@@ -81,7 +81,7 @@ MinIO -> Airflow DAG -> MinerU OCR -> Docling chunking
                          dense + sparse + ColBERT vectors
                                            |
                                            v
-                                      Qdrant
+                                        Qdrant
                                            |
                                            v
 User -> Streamlit UI -> retriever_api -> hybrid search + ref expansion
@@ -323,6 +323,4 @@ curl -X POST http://localhost:9123/search \
 ## Документация
 
 - [ML System Design Doc](docs/ML%20system%20design%20doc.md)
-- [Метрики и план A/B](docs/metrics_ab_plan.md)
 - [Подготовка Linux](scripts/setup-linux.md)
-- [Предложение пилота](docs/cold_offer_pilot.md)
