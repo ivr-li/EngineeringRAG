@@ -143,7 +143,7 @@ def _render_search_error() -> str | None:
 
 def _search(query: str, search_id: str | None = None) -> None:
     try:
-        response = _request_search(query)
+        response = _request_search_with_status(query)
     except requests.RequestException as error:
         st.toast("Не удалось получить ответ", icon=":material/error:", duration="long")
         st.session_state[ERROR_KEY] = {"query": query, "details": str(error)}
@@ -166,9 +166,22 @@ def _search(query: str, search_id: str | None = None) -> None:
     st.rerun()
 
 
+def _request_search_with_status(query: str) -> dict:
+    with st.chat_message("user", avatar="👤"):
+        st.markdown(query)
+
+    with st.chat_message("assistant", avatar="📋"):
+        with st.status("Идёт поиск по нормативной базе", expanded=True) as status:
+            st.write("Запрос отправлен. Жду результаты поиска и генерацию ответа.")
+            with st.spinner("Поиск выполняется...", show_time=True, width="stretch"):
+                response = _request_search(query)
+            status.update(label="Ответ готов", state="complete", expanded=False)
+
+    return response
+
+
 def _request_search(query: str) -> dict:
     user = get_current_user()
-    st.toast("Поиск запущен", icon="spinner", duration="long")
     response = RetrieverClient().search(
         query=query,
         user_id=user.user_id if user.is_authenticated else None,
@@ -179,7 +192,6 @@ def _request_search(query: str) -> dict:
         prefetch_k=40,
         mode="hybrid",
     )
-    st.toast("Ответ готов", icon=":material/check:", duration="short")
 
     return response
 
