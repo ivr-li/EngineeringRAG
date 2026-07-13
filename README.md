@@ -233,16 +233,6 @@ LIGHT_MODEL=Qwen/Qwen3-4B-AWQ
 ### 4. Запустить backend-сервисы поиска
 
 ```bash
-docker compose up -d postgres minio minio-init qdrant vllm-light user_api retriever_api
-```
-
-Такой запуск предполагает, что в Qdrant уже есть коллекция `construction_docs`,
-а модель `BAAI/bge-m3` доступна в `data/huggingface_cache/hub`. Для первичной
-индексации документов поднимите полный контур и запустите Airflow DAG.
-
-Для полного контура индексации, включая Airflow, MinerU и Docling:
-
-```bash
 docker compose up -d
 ```
 
@@ -293,9 +283,6 @@ curl -X POST http://localhost:9123/search \
     "mode": "hybrid"
   }'
 ```
-
-Для полноценного ответа с генерацией удобнее использовать Streamlit UI: там уже
-передаются рабочие системные промпты для rewriter и answer composer.
 
 ## Ограничения
 
