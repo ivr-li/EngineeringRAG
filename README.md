@@ -1,171 +1,328 @@
-EngineeringRAG - локальная RAG-система для поиска по нормативно-техническим документам (СП, СНиП, ГОСТ). Позволяет задавать вопросы на естественном языке и получать ответы с точными ссылками на пункты нормативной документации. Работает полностью офлайн, оптимизирована под GPU-сервер с 12 ГБ VRAM и 32 RAM.
+# EngineeringRAG
 
-Решает проблему поиска по нормам и использования LLM в чистом виде. Поиск по нормам сложен и не интуитивен, особенно если не знать, где именно искать, а использование LLM часто приводит к галлюцинациям (мы в практике столкнулись с тем, что нам отказали в принятии конструктивного решения на основе несуществующего пункта в СП).
+Локальная RAG-система для поиска ответов по нормативно-технической
+документации в строительстве: СП, СНиП, ГОСТ и внутренним техническим
+материалам.
+
+Проект помогает инженеру задать вопрос обычным языком, найти релевантные
+пункты норм и получить ответ с проверяемыми источниками. Система не заменяет
+эксперта и не принимает проектные решения: ее задача - быстро поднять
+основание из нормативной базы и показать, на чем оно держится.
+
+> Статус: рабочий MVP для внутреннего пилота. Есть индексирующий пайплайн,
+> FastAPI retriever, Streamlit UI, история запросов, логирование трассировки и
+> baseline-оценка на экспертных вопросах.
 
 ---
-## Примеры
-![Вопрс 1](docs/view1.png)  
-![Вопрс 2](docs/view2.png)
----
+
+## Зачем это нужно
+
+Работа с НТД часто упирается не в отсутствие информации, а в трудность поиска:
+
+- нужно заранее понимать, в каком документе искать;
+- обычный поиск по PDF требует почти точного совпадения формулировки;
+- универсальные LLM без привязки к базе документов могут уверенно ссылаться на
+  несуществующие пункты норм;
+- таблицы, формулы, приложения и внутренние ссылки плохо живут в простом
+  текстовом поиске.
+
+EngineeringRAG решает эту задачу как локальный инженерный поиск: документы
+загружаются в собственную базу, проходят OCR и структурный чанкинг, после чего
+поиск выполняется по смыслу, ключевым словам и late-interaction reranking.
+Ответ формируется только на основе найденного контекста.
+
+## Для кого
+
+| Роль | Что получает |
+|------|--------------|
+| Инженер-проектировщик | Быстрый поиск пунктов НТД, таблиц и ограничений без ручного просмотра десятков PDF |
+| ГИП / руководитель группы | Проверяемые основания для обсуждения проектных решений |
+| Технический специалист | Понятную локальную RAG-архитектуру с Airflow, Qdrant, FastAPI и vLLM |
+| Нетехнический заказчик пилота | Инструмент, который снижает время поиска и риск ссылок на выдуманные нормы |
+
+## Как выглядит
+
+![Пример вопроса в EngineeringRAG](docs/view1.png)
+
+![Пример ответа с источниками](docs/view2.png)
+
+## Что уже реализовано
+
+| Возможность | Что это дает |
+|-------------|--------------|
+| Загрузка и обработка PDF из MinIO | Нормативы можно добавлять в единое хранилище |
+| OCR через MinerU | Извлечение текста, формул и таблиц из сложных PDF |
+| Чанкинг через Docling | Сохранение структуры разделов, пунктов и таблиц |
+| Обработка таблиц | Разделенные и крупные таблицы получают метаданные и отдельные окна поиска |
+| Векторизация BAAI/bge-m3 | Dense, sparse и ColBERT-векторы в одной модели |
+| Qdrant hybrid search | Dense + sparse prefetch с ColBERT MaxSim rerank |
+| Расширение контекста по ссылкам | Если пункт ссылается на таблицу или раздел, система может подтянуть связанный фрагмент |
+| LLM query rewriter | Переформулирование пользовательского вопроса под поиск по НТД |
+| LLM answer composer | Ответ в Markdown с опорой на найденные фрагменты |
+| FastAPI retriever service | API для поиска, генерации ответа и трассировки запроса |
+| Streamlit UI | Пользовательский интерфейс с примерами вопросов, историей и обратной связью |
+| User API | Регистрация, сессии, настройки темы и история запросов |
+| Логирование запросов | Трассы сохраняются в PostgreSQL и MinIO для анализа качества |
+| Offline evaluation | Метрики retrieval/generation на наборе экспертных вопросов |
 
 ## Архитектура
 
-### Data Pipeline — Airflow DAG `batch_pipline`
+```text
+PDF / Markdown
+    |
+    v
+MinIO -> Airflow DAG -> MinerU OCR -> Docling chunking
+    |                                      |
+    |                                      v
+    +------------------------------> enriched chunks
+                                           |
+                                           v
+                               BAAI/bge-m3 embeddings
+                         dense + sparse + ColBERT vectors
+                                           |
+                                           v
+                                      Qdrant
+                                           |
+                                           v
+User -> Streamlit UI -> retriever_api -> hybrid search + ref expansion
+                            |              |
+                            |              v
+                            |         vllm-light / Qwen3-4B-AWQ
+                            v
+                         user_api / PostgreSQL
+```
 
-| Компонент | Детали |
-|-----------|--------|
-| Оркестрация | Airflow 3.2 |
-| Цепочка обработки | MinIO (PDF) → MinerU (OCR) → Docling (chunking) → Qdrant |
-| MinerU | Распознавание текста, формул и таблиц из PDF |
-| Docling | Иерархические Markdown-чанки |
-| Обогащение | Извлечение ссылок на нормативы (СП/СНиП/ГОСТ), таблиц |
-| Векторизация | `BAAI/bge-m3`: dense (1024d) + sparse (BM25) + ColBERT |
+### Основные компоненты
 
-> Иерархический чанкинг с плавающим окном для работы с избыточностью.
+| Компонент | Назначение |
+|-----------|------------|
+| `airflow/dags/batch_pipline.py` | Основной DAG индексации документов |
+| `airflow/dags/batch_pipline_separated.py` | Разделенные режимы полного пайплайна и Docling-only |
+| `services/retriever` | FastAPI-сервис поиска и генерации ответа |
+| `services/user_api` | FastAPI-сервис пользователей, сессий и истории |
+| `ui` | Streamlit-интерфейс для пилота |
+| `compose.yaml` | Локальная инфраструктура: Airflow, MinIO, Qdrant, vLLM, PostgreSQL, Superset |
+| `docs/ML system design doc.md` | ML System Design Doc с постановкой задачи и обоснованием решений |
 
-### Retriever Service — Streamlit + Qdrant
+## Поисковый пайплайн
 
-| Параметр | Описание |
-|----------|----------|
-| Гибридный поиск | dense + sparse → ColBERT rerank |
-| Режимы | `hybrid`, `dense`, `sparse` |
-| `top_k` | Количество финальных результатов |
-| `prefetch_k` | Кандидаты для ColBERT rerank (default: `top_k × 4`) |
-| `only_tables` | Фильтр только по чанкам-таблицам |
-| `use_rewriter` | Переформулирование запроса через LLM |
+1. Пользователь задает вопрос на русском языке.
+2. LLM может переформулировать вопрос в более точную поисковую фразу.
+3. Retriever строит dense, sparse и ColBERT-представления запроса.
+4. Qdrant выполняет dense + sparse prefetch.
+5. ColBERT MaxSim пересортировывает кандидатов.
+6. Система подтягивает связанные таблицы и разделы по `anchor_refs`,
+   `cross_refs`, `table_id`.
+7. Контекст упаковывается с учетом токен-бюджета модели.
+8. LLM формирует ответ только по переданным фрагментам.
+9. Запрос, результаты, контекст и latency сохраняются для анализа качества.
 
-> Основной метод поиска — `hybrid`.
+## Текущий baseline качества
 
-### LLM Service — `vllm-light`
+Оценка ведется на наборе из 200 экспертных вопросов из
+`services/retriever/app/eval/data`.
 
-| Параметр | Значение |
-|----------|----------|
-| Модель | `Qwen/Qwen3-4B` |
-| Роль | Query rewriter + Answer composer |
-| Endpoint | `localhost:8020` |
+Последний прогон с query rewriter, генерацией ответа и `hybrid` retrieval:
 
-### Инфраструктура
+| Метрика | Значение |
+|---------|----------|
+| Вопросов | 200 |
+| `de_recall_at_5` | 0.535 |
+| `de_recall_at_10` | 0.585 |
+| `ee_recall` до упаковки контекста | 0.595 |
+| `ce_recall` в финальном контексте | 0.550 |
+| `mrr` | 0.439 |
+| `faithfulness_score` | 0.862 |
+| `answer_relevance_score` | 0.911 |
 
-Docker Compose: Airflow 3.2, MinIO, Qdrant, Docling Serve, vllm-light. GPU: CUDAExecutionProvider.
+Эти метрики - инженерный baseline, а не финальный SLA. Цель пилота: собрать
+реальные вопросы отдела, экспертные оценки и довести качество поиска до уровня,
+при котором система стабильно помогает в рабочем сценарии.
 
----
+## Цели пилота
 
-## Установка и запуск
+- Проверить экономию времени на поиске оснований в НТД.
+- Проверить, насколько часто система находит нужный пункт среди первых
+  результатов.
+- Отследить случаи, где ответ неполный, не подтвержден контекстом или зависит
+  от формулировки вопроса.
+- Накопить корпус реальных вопросов и экспертных оценок для донастройки.
+- Принять решение: оставить инструмент внутренним помощником отдела или
+  развивать как инженерный ИТ-продукт.
 
-### 1. Подготовка системы (первичный запуск)
+Целевые ориентиры пилота:
+
+| Критерий | Цель |
+|----------|------|
+| Ответ содержит проверяемый источник | >= 90% |
+| Галлюцинации со ссылкой на несуществующий пункт | 0 критичных случаев |
+| Нужный пункт найден среди предложенных вариантов | >= 75% |
+| Экспертная полезность ответа | >= 4/5 |
+| Время ответа на целевом железе | до 1-2 минут |
+
+## Технический стек
+
+- Python 3.12
+- FastAPI, Pydantic, SQLAlchemy async
+- Streamlit
+- Airflow 3.2
+- MinIO
+- Qdrant
+- PostgreSQL
+- MinerU
+- Docling Serve
+- BAAI/bge-m3
+- Qwen/Qwen3-4B-AWQ через vLLM OpenAI-compatible API
+- Docker Compose
+
+## Системные требования
+
+Рекомендуемая конфигурация для локального пилота:
+
+| Ресурс | Рекомендация |
+|--------|--------------|
+| GPU | NVIDIA RTX 3060 или выше |
+| VRAM | 12 GB+ |
+| RAM | 32 GB+ |
+| Disk | 100 GB+ SSD |
+| OS | Linux с Docker и NVIDIA Container Toolkit |
+
+Индексация документов, OCR и online-поиск не обязаны выполняться одновременно.
+Это важно для работы на одной GPU с ограниченной VRAM.
+
+## Быстрый старт
+
+### 1. Подготовить Linux-хост
 
 ```bash
 sudo bash scripts/setup-linux.sh
 ```
 
-Устанавливает Docker, NVIDIA Container Toolkit, CUDA 12.9, Python и создает структуру `data/`.
+Скрипт устанавливает Docker, NVIDIA Container Toolkit, CUDA-зависимости и
+создает локальную структуру `data/`.
 
-### 2. Установка репозитория 
+### 2. Склонировать репозиторий
+
 ```bash
 git clone https://github.com/dvedd/EngineeringRAG
 cd EngineeringRAG
 ```
-### 3. Настройка окружения
 
-```bash
-# Создать виртуальное окружение
-python -m venv venv
+### 3. Создать `.env`
 
-# Активировать окружение
-source venv/bin/activate
-
-# Установить зависимости
-pip install -r requirements.txt
-```
-
-Создать `.env` файл с необходимыми секретами для локального dev-окружения (сгенерировать можно самостоятельно):
+Минимальный пример для локального запуска:
 
 ```env
-# Airflow
 AIRFLOW_UID=1000
-AIRFLOW__CORE__EXECUTOR=CeleryExecutor
-AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+AIRFLOW_GID=1000
+AIRFLOW__API__SECRET_KEY=change-me
 
-# Secrets
-AIRFLOW__API__SECRET_KEY=<your-secret-key>
-AIRFLOW__CORE__FERNET_KEY=<your-fernet-key>
-AIRFLOW__API_AUTH__JWT_SECRET=<your-jwt-secret>
-
-# Database
-AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
-AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
-
-# MinIO
 MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=minioadmin
 
-# Superset
-SUPERSET_SECRET_KEY=<your-superset-secret>
+TRACE_MINIO_ACCESS_KEY=trace_logger
+TRACE_MINIO_SECRET_KEY=change-me
+TRACE_MINIO_BUCKET=ragfiles
 
-# Warehouse PostgreSQL
-WAREHOUSE_PG_USER=postgres
-WAREHOUSE_PG_PASSWORD=postgres
-WAREHOUSE_PG_DB=warehouse
-
-# Client PostgreSQL
-CLIENT_PG_USER=postgres
-CLIENT_PG_PASSWORD=postgres
-CLIENT_PG_DB=postgres
-
-# PGAdmin
-PGADMIN_DEFAULT_EMAIL=admin@admin.com
-PGADMIN_DEFAULT_PASSWORD=admin
+HF_TOKEN=
+LIGHT_MODEL=Qwen/Qwen3-4B-AWQ
 ```
 
-### 4. Запуск компонентов
+Для постоянного окружения замените значения `change-me` на реальные секреты и
+не коммитьте `.env`.
+
+### 4. Запустить backend-сервисы поиска
+
+```bash
+docker compose up -d postgres minio minio-init qdrant vllm-light user_api retriever_api
+```
+
+Такой запуск предполагает, что в Qdrant уже есть коллекция `construction_docs`,
+а модель `BAAI/bge-m3` доступна в `data/huggingface_cache/hub`. Для первичной
+индексации документов поднимите полный контур и запустите Airflow DAG.
+
+Для полного контура индексации, включая Airflow, MinerU и Docling:
 
 ```bash
 docker compose up -d
 ```
 
-Сервисы:
-- Airflow UI: `http://localhost:8080` (admin:admin)
-- MinIO: `http://localhost:9000` (minioadmin:minioadmin)
-- MinIO Console: `http://localhost:9001`
-- Qdrant: `http://localhost:6333`
-- vllm-light: `http://localhost:8020`
-- Docling: `http://localhost:5001`
+### 5. Запустить Streamlit UI
 
-### 5. Запуск UI сервиса
+UI сейчас запускается локально поверх backend-сервисов:
 
 ```bash
-cd retriever_service
-streamlit run app_v2.py
+cd ui
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+RETRIEVER_API_URL=http://127.0.0.1:9123 \
+USER_API_URL=http://127.0.0.1:9130 \
+streamlit run app.py
 ```
 
-Адрес сервиса: http://localhost:8501
+После запуска UI будет доступен на `http://localhost:8501`.
 
----
+## Полезные адреса
 
-## Планируемые улучшения:
+| Сервис | URL |
+|--------|-----|
+| Streamlit UI | `http://localhost:8501` |
+| Retriever API | `http://localhost:9123` |
+| User API | `http://localhost:9130` |
+| vLLM light | `http://localhost:8020` |
+| Qdrant | `http://localhost:6333` |
+| MinIO API | `http://localhost:9000` |
+| MinIO Console | `http://localhost:9001` |
+| Airflow UI | `http://localhost:8080` |
+| Docling Serve | `http://localhost:5001` |
+| Superset | `http://localhost:5054` |
 
-### Retriever Service
-- [x] Система логирования запроса и ответа с метаданными
-- [x] Метрика качества для A/B тестов
-- [x] Разделение app_v2.py на модули
-- [x] Тестирование размеров контекста (RTX3060, 12GB VRAM) - для квантированноый модели на 6гб 10000 свободно
-- [x] Декомпозиция запросов вместо переформулирования
-- [x] A/B тесты для проверки изменений
-- [x] Поведение при отсутствии ответа в базе
-- [x] FastAPI сервис для поиска
-- [x] Отладка фильтрации по имени файла
-- [ ] Передача изображений из Payload в контекст
-- [x] История запросов
-### Data Pipeline
-- [ ] Metadata database для отслеживания файлов в MinIO (PostgreSQL)
-- [ ] Переход MinerU на Redis (проблема OOM Killer)
-- [ ] Терминологический словарь по строительным нормам
-- [ ] Автоматическое обновление векторной БД при изменении документов в MinIO
-- [ ] Очистка памяти системы (MinerU держит модели в VRAM)
-- [x] Разгрузка save_docling_results
-- [ ] Оптимизация docker images
-- [ ] Оптимизация испольщования памяти
-- [x] Вынос Qdrant в отдельный сервис
-- [ ] Сохранение изображений из MinerU в MinIO и запись в Payload
-- [x] Обьединять разибитые в pdf таблици
+## Пример API-запроса
+
+```bash
+curl -X POST http://localhost:9123/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Как располагать стыки рабочей арматуры внахлестку?",
+    "rewrite_system_prompt": "",
+    "compose_system_prompt": "",
+    "use_rewriter": false,
+    "top_k": 4,
+    "prefetch_k": 40,
+    "mode": "hybrid"
+  }'
+```
+
+Для полноценного ответа с генерацией удобнее использовать Streamlit UI: там уже
+передаются рабочие системные промпты для rewriter и answer composer.
+
+## Ограничения
+
+- Система не является источником истины: инженер обязан проверить первоисточник
+  перед применением ответа в проекте.
+- Качество зависит от полноты загруженной базы НТД и качества OCR.
+- Таблицы и формулы поддерживаются, но остаются самым сложным типом контента.
+- На одной RTX 3060 нельзя комфортно держать все тяжелые операции одновременно:
+  OCR, индексацию и генерацию лучше разводить по времени.
+- Текущий UI не упакован в Docker Compose как отдельный сервис.
+
+## Roadmap
+
+Ближайшие улучшения:
+
+- передача изображений из payload в контекст ответа;
+- metadata database для отслеживания файлов в MinIO;
+- автоматическое обновление индекса при изменении документов;
+- перевод проблемных частей MinerU на более устойчивую очередь;
+- оптимизация Docker images и потребления памяти;
+- расширение A/B-оценки поисковых конфигураций;
+- улучшение обработки таблиц, формул и ссылок на приложения.
+
+## Документация
+
+- [ML System Design Doc](docs/ML%20system%20design%20doc.md)
+- [Метрики и план A/B](docs/metrics_ab_plan.md)
+- [Подготовка Linux](scripts/setup-linux.md)
+- [Предложение пилота](docs/cold_offer_pilot.md)
