@@ -122,8 +122,6 @@ User -> Streamlit UI -> retriever_api -> hybrid search + ref expansion
 Оценка ведется на наборе из 200(не провалидированных) "экспертных" вопросов из
 `services/retriever/app/eval/data`.
 
-Последний прогон с query rewriter, генерацией ответа и `hybrid` retrieval:
-
 | Метрика | Значение |
 |---------|----------|
 | Вопросов | 200 |
