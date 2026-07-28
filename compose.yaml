@@ -57,6 +57,7 @@ services:
     postgres:
         image: postgres:18
         container_name: postgres
+        profiles: ["base"]
         restart: unless-stopped
         environment:
             POSTGRES_DB: app_db
@@ -75,6 +76,7 @@ services:
     pgadmin:
         image: dpage/pgadmin4:9.15.0
         container_name: pgadmin
+        profiles: ["base"]
         restart: unless-stopped
         environment:
             PGADMIN_DEFAULT_EMAIL: admin@example.com
@@ -91,6 +93,7 @@ services:
             context: .
             dockerfile: services/user_api/Dockerfile
         container_name: user_api
+        profiles: ["search"]
         restart: unless-stopped
         environment:
             USER_API_DATABASE_URL: >-
@@ -116,6 +119,7 @@ services:
             context: .
             dockerfile: services/retriever/Dockerfile
         container_name: retriever_api
+        profiles: ["search"]
         restart: unless-stopped
         environment:
             RETRIEVER_DATABASE_URL: >-
@@ -130,6 +134,11 @@ services:
             MINIO_SECURE: "false"
             TRACE_BUCKET_NAME: ragfiles
             TRACE_PREFIX: dev_data/logs/query-traces
+            ANSWER_MODEL_CONTEXT_TOKENS: ${ANSWER_MODEL_CONTEXT_TOKENS:-16000}
+            ANSWER_MAX_TOKENS: ${ANSWER_MAX_TOKENS:-3000}
+            ANSWER_CONTEXT_LIMIT: ${ANSWER_CONTEXT_LIMIT:-12}
+            ANSWER_CONTEXT_HARD_LIMIT: ${ANSWER_CONTEXT_HARD_LIMIT:-48}
+            ANSWER_MAX_TEXT_BLOCK_TOKENS: ${ANSWER_MAX_TEXT_BLOCK_TOKENS:-900}
         ports:
             - "9123:9123"
         volumes:
@@ -164,6 +173,7 @@ services:
     vllm-light:
         <<: *vllm-common
         container_name: vllm-light
+        profiles: ["search"]
         environment:
             HF_HOME: /root/.cache/huggingface
             HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
@@ -174,11 +184,11 @@ services:
             - --served-model-name
             - query-rewriter
             - --gpu-memory-utilization
-            - "0.50"
+            - ${VLLM_GPU_MEMORY_UTILIZATION:-0.75}
             - --max-model-len
-            - "10000"
+            - ${VLLM_MAX_MODEL_LEN:-16000}
             - --max-num-seqs
-            - "8"
+            - ${VLLM_MAX_NUM_SEQS:-2}
             - --reasoning-parser
             - qwen3
             - --default-chat-template-kwargs
@@ -195,6 +205,7 @@ services:
     docling-serve:
         image: quay.io/docling-project/docling-serve-cu130:main
         container_name: docling-serve
+        profiles: ["processing"]
         ports:
             - "5001:5001"
         environment:
@@ -218,6 +229,7 @@ services:
     mineru-api:
         image: dvmed/mineru:v3.0.9
         container_name: mineru-api
+        profiles: ["processing"]
         restart: always
         ports:
             - 8000:8000
@@ -242,6 +254,7 @@ services:
     qdrant:
         image: qdrant/qdrant:latest
         container_name: qdrant
+        profiles: ["base"]
         environment:
             - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=512
             - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=4
@@ -259,6 +272,7 @@ services:
     minio:
         image: minio/minio:latest
         container_name: minio
+        profiles: ["base"]
         restart: unless-stopped
         command: server /data --console-address ":9001"
         environment:
@@ -279,6 +293,7 @@ services:
     minio-init:
         image: minio/mc:latest
         container_name: minio-init
+        profiles: ["base"]
         restart: "no"
         depends_on:
             minio:
@@ -305,6 +320,7 @@ services:
 
     airflow_superset-db:
         image: postgres:16
+        profiles: ["processing"]
         environment:
             POSTGRES_USER: superset
             POSTGRES_PASSWORD: superset
@@ -320,6 +336,7 @@ services:
 
     airflow_superset:
         image: apache/superset:6.1.0rc2-py312
+        profiles: ["processing"]
         ports:
             - "5054:8088"
         environment:
@@ -334,6 +351,7 @@ services:
 
     airflow_postgres:
         image: postgres:16
+        profiles: ["processing"]
         environment:
             POSTGRES_USER: airflow
             POSTGRES_PASSWORD: airflow
@@ -348,6 +366,7 @@ services:
 
     airflow_redis:
         image: redis:7.2-bookworm
+        profiles: ["processing"]
         expose:
             - 6379
         healthcheck:
@@ -359,6 +378,7 @@ services:
 
     airflow-init:
         <<: *airflow-common
+        profiles: ["processing"]
         volumes:
             - ./airflow/dags:/opt/airflow/dags
             - ./airflow/logs:/opt/airflow/logs
@@ -397,6 +417,7 @@ services:
     airflow-apiserver:
         <<: *airflow-common
         container_name: airflow-apiserver
+        profiles: ["processing"]
         command: api-server
         ports:
             - "8080:8080"
@@ -420,6 +441,7 @@ services:
     airflow-scheduler:
         <<: *airflow-common
         container_name: airflow-scheduler
+        profiles: ["processing"]
         command: scheduler
         healthcheck:
             test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
@@ -435,6 +457,7 @@ services:
     airflow-dag-processor:
         <<: *airflow-common
         container_name: airflow-dag-processor
+        profiles: ["processing"]
         command: dag-processor
         healthcheck:
             test:
@@ -454,6 +477,7 @@ services:
     airflow-worker:
         <<: *airflow-common
         container_name: airflow-worker
+        profiles: ["processing"]
         command: celery worker
         hostname: airflow-worker
         ports:
@@ -501,6 +525,7 @@ services:
     airflow-triggerer:
         <<: *airflow-common
         container_name: airflow-triggerer
+        profiles: ["processing"]
         command: triggerer
         healthcheck:
             test:
@@ -520,6 +545,7 @@ services:
     airflow_flower:
         <<: *airflow-common
         container_name: airflow-flower
+        profiles: ["processing"]
         command: celery flower
         ports:
             - "5555:5555"
@@ -536,6 +562,7 @@ services:
 
     warehouse-postgres:
         image: postgres:16
+        profiles: ["processing"]
         environment:
             POSTGRES_USER: ${AIRFLOW_WAREHOUSE_PG_USER:-postgres}
             POSTGRES_PASSWORD: ${AIRFLOW_WAREHOUSE_PG_PASSWORD:-postgres}
@@ -552,6 +579,7 @@ services:
 
     airflow_client-postgres:
         image: postgres:16
+        profiles: ["processing"]
         environment:
             POSTGRES_USER: ${AIRFLOW_CLIENT_PG_USER:-postgres}
             POSTGRES_PASSWORD: ${AIRFLOW_CLIENT_PG_PASSWORD:-postgres}
@@ -563,6 +591,7 @@ services:
 
     airflow_pgadmin:
         image: dpage/pgadmin4
+        profiles: ["processing"]
         environment:
             PGADMIN_DEFAULT_EMAIL: ${AIRFLOW_PGADMIN_EMAIL:-admin@admin.com}
             PGADMIN_DEFAULT_PASSWORD: ${AIRFLOW_PGADMIN_PASSWORD:-admin}

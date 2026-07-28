@@ -128,7 +128,7 @@ def _select_candidates(
     primary_count = 0
 
     for result in results:
-        if result.id in seen or not _is_candidate_allowed(
+        if result.id in seen or not _allow_candidate(
             result, primary_count, terms, expanded_relations
         ):
             continue
@@ -145,22 +145,22 @@ def _select_candidates(
     return candidates
 
 
-def _is_candidate_allowed(
+def _allow_candidate(
     result: RetrievalResult,
     primary_count: int,
     terms: set[str],
     expanded_relations: dict[str, str],
 ) -> bool:
     if result.is_table:
-        return _is_table_candidate_allowed(result, terms, expanded_relations)
+        return _allow_table_candidate(result, terms, expanded_relations)
 
-    if _is_required_reference_result(result, expanded_relations):
+    if _is_req_ref_result(result, expanded_relations):
         return True
 
     return primary_count < LLMConfig.ANSWER_CONTEXT_LIMIT
 
 
-def _is_table_candidate_allowed(
+def _allow_table_candidate(
     result: RetrievalResult,
     terms: set[str],
     expanded_relations: dict[str, str],
@@ -174,7 +174,7 @@ def _is_table_candidate_allowed(
     return (result.table_window_index or 1) == 1
 
 
-def _is_required_reference_result(
+def _is_req_ref_result(
     result: RetrievalResult,
     expanded_relations: dict[str, str],
 ) -> bool:
@@ -252,6 +252,7 @@ def _format_block(
         f"Документ: {result.filename}",
         f"Связь: {_relation_line(relation)}",
         f"Раздел: {result.section_path or '—'}",
+        f"Заголовки: {_headings_line(result)}",
         f"Тип: {'таблица' if result.is_table else 'текст'}",
         _table_line(result, relation),
         f"Ссылки: {_refs_line(result)}",
@@ -385,6 +386,10 @@ def _refs_line(result: RetrievalResult) -> str:
     refs.extend(f"anchor:{ref}" for ref in result.anchor_refs)
 
     return ", ".join(refs) or "—"
+
+
+def _headings_line(result: RetrievalResult) -> str:
+    return " > ".join(result.headings) or "—"
 
 
 def _table_line(result: RetrievalResult, relation: str | None) -> str:

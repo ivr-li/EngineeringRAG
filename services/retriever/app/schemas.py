@@ -8,24 +8,35 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 class LLMConfig:
     REWRITER_BASE_URL = os.getenv("REWRITER_BASE_URL", "http://vllm-light:8020/v1")
     REWRITER_MODEL = os.getenv("REWRITER_MODEL", "query-rewriter")
 
     ANSWER_BASE_URL = os.getenv("ANSWER_BASE_URL", REWRITER_BASE_URL)
     ANSWER_MODEL = os.getenv("ANSWER_MODEL", REWRITER_MODEL)
-    ANSWER_CONTEXT_LIMIT = 6
-    ANSWER_CONTEXT_HARD_LIMIT = 24
-    ANSWER_MODEL_CONTEXT_TOKENS = 10000
-    ANSWER_MAX_TOKENS = 1600
-    ANSWER_MIN_TOKENS = 512
-    ANSWER_TOKEN_SAFETY_MARGIN = 700
-    ANSWER_MIN_CONTEXT_TOKENS = 1200
-    ANSWER_MAX_TEXT_BLOCK_TOKENS = 700
-    ANSWER_MAX_TABLE_HEADER_TOKENS = 260
-    ANSWER_MAX_TABLE_ROW_TOKENS = 650
-    ANSWER_MAX_TABLE_SNIPPETS = 4
-    ANSWER_TABLE_SNIPPET_CHARS = 900
+    ANSWER_CONTEXT_LIMIT = _int_env("ANSWER_CONTEXT_LIMIT", 6)
+    ANSWER_CONTEXT_HARD_LIMIT = _int_env("ANSWER_CONTEXT_HARD_LIMIT", 24)
+    ANSWER_MODEL_CONTEXT_TOKENS = _int_env("ANSWER_MODEL_CONTEXT_TOKENS", 10000)
+    ANSWER_MAX_TOKENS = _int_env("ANSWER_MAX_TOKENS", 1600)
+    ANSWER_MIN_TOKENS = _int_env("ANSWER_MIN_TOKENS", 512)
+    ANSWER_TOKEN_SAFETY_MARGIN = _int_env("ANSWER_TOKEN_SAFETY_MARGIN", 700)
+    ANSWER_MIN_CONTEXT_TOKENS = _int_env("ANSWER_MIN_CONTEXT_TOKENS", 1200)
+    ANSWER_MAX_TEXT_BLOCK_TOKENS = _int_env("ANSWER_MAX_TEXT_BLOCK_TOKENS", 700)
+    ANSWER_MAX_TABLE_HEADER_TOKENS = _int_env("ANSWER_MAX_TABLE_HEADER_TOKENS", 260)
+    ANSWER_MAX_TABLE_ROW_TOKENS = _int_env("ANSWER_MAX_TABLE_ROW_TOKENS", 650)
+    ANSWER_MAX_TABLE_SNIPPETS = _int_env("ANSWER_MAX_TABLE_SNIPPETS", 4)
+    ANSWER_TABLE_SNIPPET_CHARS = _int_env("ANSWER_TABLE_SNIPPET_CHARS", 900)
     SearchMode = Literal["hybrid", "dense", "sparse"]
     SCORE_THRESHOLD = 0.0
 
@@ -45,6 +56,7 @@ class SearchRequest(BaseModel):
     use_rewriter: bool = True
     expand_refs: bool = True
     ref_depth: int = 1
+    answer_strategy: Literal["auto"] = "auto"
     filename_filter: str | None = None
     section_filter: str | None = None
     rewrite_system_prompt: str
@@ -90,6 +102,7 @@ class SearchResponse(BaseModel):
     effective_query: str = Field(...)
     was_rewritten: bool = Field(False)
     results: list[RetrievalResult]
+    answer_mode: str | None = None
 
 
 class RetrievedChunkTrace(BaseModel):
@@ -112,6 +125,7 @@ class QueryTrace(BaseModel):
     search_mode: str
     top_k: int
     prefetch_k: int
+    answer_mode: str | None = None
     retrieved: list[RetrievedChunkTrace] = Field(default_factory=list)
     context_chunks: list[str] = Field(default_factory=list)
     answer: str | None = None

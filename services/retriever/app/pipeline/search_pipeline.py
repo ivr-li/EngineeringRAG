@@ -6,12 +6,15 @@ from starlette.concurrency import run_in_threadpool
 
 from app.pipeline.schemas import (
     ContextExclusion,
+    ExpandedChunk,
     PipelineConfiguration,
     PipelineResult,
+    QueryAspect,
 )
 from app.schemas import SearchRequest
 from app.services import QdrantRetriever, prepare_answer_context
 from app.services.context_packer import PackedContext
+from app.services.research import build_evidence, build_q_plan, pick_ans_mode
 
 Rewriter = Callable[[OpenAI, str, str], Awaitable[tuple[str, bool]]]
 Composer = Callable[..., Awaitable[str]]
@@ -69,6 +72,7 @@ class SearchPipeline:
             use_rewriter=request.use_rewriter,
             expand_refs=request.expand_refs,
             ref_depth=request.ref_depth,
+            answer_strategy=request.answer_strategy,
             experiment_id=experiment_id,
             variant=variant,
         )
@@ -94,23 +98,51 @@ class SearchPipeline:
         result.was_rewritten = was_rewritten
 
     async def _retrieve(self, request: SearchRequest, result: PipelineResult) -> None:
+        result.query_plan = build_q_plan(request.query, result.effective_question)
+
         with result.timings.measure("retrieval_latency_ms"):
-            retrieved, expanded = await run_in_threadpool(
-                self.retriever.search_stages,
-                query=result.effective_question,
-                top_k=request.top_k,
-                prefetch_k=request.prefetch_k,
-                mode=request.mode,
-                only_tables=request.only_tables,
-                expand_refs=request.expand_refs,
-                ref_depth=request.ref_depth,
-                filename_filter=request.filename_filter,
-                section_filter=request.section_filter,
+            retrieved, expanded = await self._retrieve_plan(
+                request,
+                result.query_plan,
             )
 
         result.retrieved = retrieved
         result.expanded = expanded
         result.results = self.retriever.merge_stages(retrieved, expanded)
+
+    async def _retrieve_plan(
+        self,
+        request: SearchRequest,
+        plan: list[QueryAspect],
+    ) -> tuple[list, list]:
+        retrieved: list = []
+        expanded: list = []
+        seen: set[str] = set()
+
+        for aspect in plan:
+            batch, refs = await self._retrieve_one(request, aspect.query)
+            _add_results(retrieved, batch, seen)
+            _add_expanded(expanded, refs, seen)
+
+        return retrieved, expanded
+
+    async def _retrieve_one(
+        self,
+        request: SearchRequest,
+        query: str,
+    ) -> tuple[list, list[ExpandedChunk]]:
+        return await run_in_threadpool(
+            self.retriever.search_stages,
+            query=query,
+            top_k=request.top_k,
+            prefetch_k=request.prefetch_k,
+            mode=request.mode,
+            only_tables=request.only_tables,
+            expand_refs=request.expand_refs,
+            ref_depth=request.ref_depth,
+            filename_filter=request.filename_filter,
+            section_filter=request.section_filter,
+        )
 
     async def _pack_and_generate(
         self,
@@ -120,12 +152,17 @@ class SearchPipeline:
         if not result.results:
             return
 
+        result.evidence_items = build_evidence(result.results, request.query)
+        result.answer_mode = pick_ans_mode(result.evidence_items, request.query)
         static_prompt, packed = prepare_answer_context(
             results=result.results,
             query=request.query,
             effective_query=result.effective_question,
             system_prompt=request.compose_system_prompt,
             expanded_chunks=result.expanded,
+            answer_mode=result.answer_mode,
+            evidence_items=result.evidence_items,
+            query_plan=result.query_plan,
         )
         _apply_packed_context(result, packed)
 
@@ -149,6 +186,9 @@ class SearchPipeline:
                 packed_context=packed,
                 static_prompt=static_prompt,
                 expanded_chunks=result.expanded,
+                answer_mode=result.answer_mode,
+                evidence_items=result.evidence_items,
+                query_plan=result.query_plan,
             )
 
 
@@ -164,3 +204,25 @@ def _apply_packed_context(result: PipelineResult, packed: PackedContext) -> None
     ]
     result.context_excluded = selection_excluded + token_excluded
     result.context_text = packed.text
+
+
+def _add_results(target: list, batch: list, seen: set[str]) -> None:
+    for chunk in batch:
+        if chunk.id in seen:
+            continue
+
+        target.append(chunk)
+        seen.add(chunk.id)
+
+
+def _add_expanded(
+    target: list[ExpandedChunk],
+    batch: list[ExpandedChunk],
+    seen: set[str],
+) -> None:
+    for item in batch:
+        if item.chunk.id in seen:
+            continue
+
+        target.append(item)
+        seen.add(item.chunk.id)

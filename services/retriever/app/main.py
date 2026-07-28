@@ -57,6 +57,7 @@ TRACE_PREFIX = os.getenv("TRACE_PREFIX", "dev_data/logs/query-traces")
 def _apply_pipeline_trace(trace: QueryTrace, result: PipelineResult) -> None:
     trace.rewritten_query = result.effective_question if result.was_rewritten else None
     trace.answer = result.answer
+    trace.answer_mode = result.answer_mode
     trace.latency_ms = result.timings.latency_ms
     trace.rewrite_latency_ms = result.timings.rewrite_latency_ms
     trace.retrieval_latency_ms = result.timings.retrieval_latency_ms
@@ -138,6 +139,7 @@ async def search(request: SearchRequest = Body(..., description="Search paramete
             answer=result.answer,
             effective_query=result.effective_question,
             was_rewritten=result.was_rewritten,
+            answer_mode=result.answer_mode,
         )
     except Exception as ex:
         trace.error = str(ex)

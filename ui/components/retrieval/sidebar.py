@@ -23,7 +23,7 @@ class SidebarParams:
                 "**sparse** — только BGE-M3 BM25 (ключевые слова)."
             ),
         )
-        self.top_k: int = st.slider("top_k — финальных результатов", 1, 20, 4)
+        self.top_k: int = st.slider("top_k — финальных результатов", 1, 20, 6)
         self.prefetch_k: int = self._render_prefetch_k()
         self.only_tables, self.filename_filter, self.section_filter = (
             self._render_filters()
@@ -59,8 +59,8 @@ class SidebarParams:
         return st.slider(
             "prefetch_k — кандидатов для ColBERT rerank",
             min_value=self.top_k,
-            max_value=100,
-            value=min(40, 100),
+            max_value=160,
+            value=min(80, 160),
             help="Кандидатов из dense+sparse перед rerank. Больше = точнее, медленнее.",
         )
 
