@@ -1,14 +1,10 @@
 APP_UI_STYLES = """
 <style>
 :root {
-    /* Main layout knobs. Increase offset to make the block narrower. */
-    --text-block-side-offset: clamp(1rem, 24vw, 28rem);
-    --text-block-width: min(
-        100%,
-        max(
-            20rem,
-            calc(100% - var(--text-block-side-offset) - var(--text-block-side-offset))
-        )
+    /* Main layout knobs. Increase side offset to make the block narrower. */
+    --text-block-side-offset: 22%;
+    --text-block-width: calc(
+        100% - var(--text-block-side-offset) - var(--text-block-side-offset)
     );
     --text-block-padding-x: 0rem;
     --question-card-height: 2rem;
@@ -16,6 +12,16 @@ APP_UI_STYLES = """
     --search-input-button-size: 1.9rem;
     --refine-popover-width: 900px;
     --sidebar-width: 20rem;
+}
+@media (max-width: 1200px) {
+    :root {
+        --text-block-side-offset: 8%;
+    }
+}
+@media (max-width: 640px) {
+    :root {
+        --text-block-side-offset: 4%;
+    }
 }
 #MainMenu,
 footer,

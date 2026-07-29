@@ -106,6 +106,52 @@ def _table_relation(table_id: str) -> str:
     return f"table_id:{table_id}"
 
 
+def _encode_query(
+    query: str,
+    dense: bool,
+    sparse: bool,
+    colbert: bool,
+):
+    model = get_bge_m3()
+
+    return model.encode(
+        [query],
+        max_length=128,
+        return_dense=dense,
+        return_sparse=sparse,
+        return_colbert_vecs=colbert,
+    )
+
+
+def _sparse_vector(weights) -> SparseVector:
+    return SparseVector(
+        indices=[int(key) for key in weights.keys()],
+        values=[float(value) for value in weights.values()],
+    )
+
+
+def _hybrid_prefetch(
+    dense_vec: list[float],
+    weights,
+    prefetch_k: int,
+    qdrant_filter: Filter | None,
+) -> list[Prefetch]:
+    return [
+        Prefetch(
+            query=dense_vec,
+            using="dense",
+            limit=prefetch_k // 2,
+            filter=qdrant_filter,
+        ),
+        Prefetch(
+            query=_sparse_vector(weights),
+            using="sparse",
+            limit=prefetch_k,
+            filter=qdrant_filter,
+        ),
+    ]
+
+
 # ==================================
 # Retriever
 # ==================================
@@ -449,40 +495,14 @@ class QdrantRetriever:
         """
         Hybrid search: dense Prefetch + sparse Prefetch → Colbert MaxSim rerank.
         """
-        model = get_bge_m3()
-        output = model.encode(
-            [query],
-            max_length=128,  # короткий запрос — экономия памяти
-            return_dense=True,
-            return_sparse=True,
-            return_colbert_vecs=True,
-        )
+        output = _encode_query(query, dense=True, sparse=True, colbert=True)
         dense_vec = output["dense_vecs"][0].tolist()
-        lw = output["lexical_weights"][0]
+        weights = output["lexical_weights"][0]
         colbert_vec = output["colbert_vecs"][0].tolist()
 
         hits = self.client.query_points(
             collection_name=self.collection,
-            prefetch=[
-                # Semantic recall
-                Prefetch(
-                    query=dense_vec,
-                    using="dense",
-                    limit=prefetch_k // 2,
-                    filter=qdrant_filter,
-                ),
-                # Keyword recall
-                Prefetch(
-                    query=SparseVector(
-                        indices=[int(k) for k in lw.keys()],
-                        values=[float(v) for v in lw.values()],
-                    ),
-                    using="sparse",
-                    limit=prefetch_k,
-                    filter=qdrant_filter,
-                ),
-            ],
-            # Colbert rerank (MaxSim) across both prefetch sets
+            prefetch=_hybrid_prefetch(dense_vec, weights, prefetch_k, qdrant_filter),
             query=colbert_vec,
             using="colbert",
             limit=top_k,
@@ -498,14 +518,7 @@ class QdrantRetriever:
         qdrant_filter: Filter | None,
     ) -> list[RetrievalResult]:
         """ANN search using BGE-M3 dense vector only."""
-        model = get_bge_m3()
-        output = model.encode(
-            [query],
-            max_length=128,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False,
-        )
+        output = _encode_query(query, dense=True, sparse=False, colbert=False)
         vec = output["dense_vecs"][0].tolist()
 
         result = self.client.query_points(
@@ -525,20 +538,8 @@ class QdrantRetriever:
         qdrant_filter: Filter | None,
     ) -> list[RetrievalResult]:
         """BM25 keyword search using BGE-M3 sparse (lexical) weights."""
-        model = get_bge_m3()
-        output = model.encode(
-            [query],
-            max_length=128,
-            return_dense=False,
-            return_sparse=True,
-            return_colbert_vecs=False,
-        )
-        lw = output["lexical_weights"][0]
-
-        sv = SparseVector(
-            indices=[int(k) for k in lw.keys()],
-            values=[float(v) for v in lw.values()],
-        )
+        output = _encode_query(query, dense=False, sparse=True, colbert=False)
+        sv = _sparse_vector(output["lexical_weights"][0])
 
         result = self.client.query_points(
             collection_name=self.collection,

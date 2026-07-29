@@ -4,9 +4,10 @@ import structlog
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
-from app.pipeline.schemas import ExpandedChunk
+from app.pipeline.schemas import EvidenceItem, ExpandedChunk, QueryAspect
 from app.schemas import LLMConfig, RetrievalResult
 from app.services.context_packer import PackedContext, build_packed_context
+from app.services.research import evidence_block, plan_block
 
 log = structlog.get_logger(__name__)
 _WORD_RE = re.compile(r"[а-яёa-z0-9][а-яёa-z0-9.\-]*", re.IGNORECASE)
@@ -33,6 +34,7 @@ _COVERAGE_STOP_TERMS = {
 
 async def _call_llm(
     client: OpenAI,
+    model: str,
     system_prompt: str,
     user_content: str,
     temperature: float = 0.2,
@@ -41,7 +43,7 @@ async def _call_llm(
     try:
         resp = await run_in_threadpool(
             client.chat.completions.create,
-            model=LLMConfig.REWRITER_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -62,7 +64,12 @@ async def rewrite_query(
     system_prompt: str,
 ) -> tuple[str, bool]:
     rewritten = await _call_llm(
-        client, system_prompt, query, temperature=0.2, max_tokens=256
+        client,
+        LLMConfig.REWRITER_MODEL,
+        system_prompt,
+        query,
+        temperature=0.2,
+        max_tokens=256,
     )
 
     if not rewritten:
@@ -77,22 +84,17 @@ async def compose_answer(
     effective_query: str,
     system_prompt: str,
     results: list[RetrievalResult],
-    trace_metadata: dict | None = None,
-    packed_context: PackedContext | None = None,
-    static_prompt: str | None = None,
-    expanded_chunks: list[ExpandedChunk] | None = None,
+    trace_metadata: dict | None = None, packed_context: PackedContext | None = None,
+    static_prompt: str | None = None, expanded_chunks: list[ExpandedChunk] | None = None,
+    answer_mode: str | None = None, evidence_items: list[EvidenceItem] | None = None,
+    query_plan: list[QueryAspect] | None = None,
 ) -> str:
     if not results:
         return _empty_answer()
 
     static_prompt, packed = prepare_answer_context(
-        results=results,
-        query=query,
-        effective_query=effective_query,
-        system_prompt=system_prompt,
-        packed_context=packed_context,
-        static_prompt=static_prompt,
-        expanded_chunks=expanded_chunks,
+        results, query, effective_query, system_prompt, packed_context, static_prompt,
+        expanded_chunks, answer_mode, evidence_items, query_plan
     )
     _update_trace_metadata(trace_metadata, packed)
     _log_packed_context(packed)
@@ -107,11 +109,19 @@ def prepare_answer_context(
     query: str,
     effective_query: str,
     system_prompt: str,
-    packed_context: PackedContext | None = None,
-    static_prompt: str | None = None,
-    expanded_chunks: list[ExpandedChunk] | None = None,
+    packed_context: PackedContext | None = None, static_prompt: str | None = None,
+    expanded_chunks: list[ExpandedChunk] | None = None, answer_mode: str | None = None,
+    evidence_items: list[EvidenceItem] | None = None,
+    query_plan: list[QueryAspect] | None = None,
 ) -> tuple[str, PackedContext]:
-    prompt = static_prompt or _build_static_prompt(query, effective_query, results)
+    prompt = static_prompt or _build_static_prompt(
+        query,
+        effective_query,
+        results,
+        answer_mode or "direct_supported",
+        evidence_items or [],
+        query_plan or [],
+    )
     expanded_relations = {item.chunk.id: item.relation for item in expanded_chunks or []}
     packed = packed_context or build_packed_context(
         results=results,
@@ -137,13 +147,22 @@ def _build_static_prompt(
     query: str,
     effective_query: str,
     results: list[RetrievalResult],
+    answer_mode: str,
+    evidence_items: list[EvidenceItem],
+    query_plan: list[QueryAspect],
 ) -> str:
     usage_rules = _context_usage_rules(results)
     coverage_note = _query_coverage_note(query, results)
+    plan = plan_block(query_plan)
+    evidence = evidence_block(evidence_items, answer_mode)
+    mode_rules = _mode_rules(answer_mode)
 
     return (
         f"Исходный запрос пользователя:\n{query}\n\n"
         f"Поисковый запрос после переформулирования:\n{effective_query}\n\n"
+        f"План поиска:\n{plan}\n\n"
+        f"Извлеченные evidence:\n{evidence}\n\n"
+        f"Режим ответа:\n{mode_rules}\n\n"
         f"Проверка покрытия исходного вопроса:\n{coverage_note}\n\n"
         f"Правила использования найденного контекста:\n{usage_rules}"
     )
@@ -185,6 +204,7 @@ async def _call_answer_llm(
     user_prompt = f"{static_prompt}\n\nКонтекст из ретривера:\n{packed.text}"
     return await _call_llm(
         client,
+        LLMConfig.ANSWER_MODEL,
         system_prompt,
         user_prompt,
         temperature=0.15,
@@ -206,7 +226,8 @@ def _build_context(results: list[RetrievalResult]) -> str:
 def _context_usage_rules(results: list[RetrievalResult]) -> str:
     rules = [
         "- Сначала проверь, подтверждают ли найденные фрагменты полный исходный вопрос, а не только отдельные слова или условия.",
-        "- Если контекст покрывает только часть вопроса, не формируй прямой ответ по совпавшей части; прямо укажи, чего нет в источниках.",
+        "- Не выдавай смежный нормативный смысл за прямой ответ на исходный вопрос.",
+        "- Если есть только частичные или смежные данные, дай сводку найденного и явно напиши, что прямой ответ не подтвержден.",
         "- Фрагменты, подтянутые по внутренней ссылке, являются обязательным контекстом.",
         "- Если текст ссылается на таблицу и таблица есть в контексте, извлеки из нее конкретные значения.",
         "- Не отвечай только фразой, что значения указаны в таблице, если строки таблицы переданы ниже.",
@@ -219,6 +240,26 @@ def _context_usage_rules(results: list[RetrievalResult]) -> str:
             '"Что удалось найти".'
         )
     return "\n".join(rules)
+
+
+def _mode_rules(answer_mode: str) -> str:
+    if answer_mode == "not_found":
+        return (
+            "Прямой ответ в найденных действующих нормах не подтвержден. "
+            "Не подменяй его смежными нормами; покажи, что искали и что найдено."
+        )
+    if answer_mode == "partial_supported":
+        return (
+            "Дай частичную сводку: отдели прямой недостаток данных от смежных "
+            "нормативных фрагментов и объясни, почему они не являются полным ответом."
+        )
+    if answer_mode == "multi_path":
+        return (
+            "Собери возможные пути решения по условиям применимости, затем дай "
+            "итоговую инженерную сводку."
+        )
+
+    return "Дай прямой ответ с условиями применения и нормативным основанием."
 
 
 def _query_coverage_note(query: str, results: list[RetrievalResult]) -> str:

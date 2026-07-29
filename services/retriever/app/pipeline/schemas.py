@@ -14,8 +14,14 @@ class PipelineConfiguration(BaseModel):
     use_rewriter: bool
     expand_refs: bool
     ref_depth: int
+    answer_strategy: str = "auto"
     experiment_id: str | None = None
     variant: str | None = None
+
+
+class QueryAspect(BaseModel):
+    query: str
+    aspect: str
 
 
 class ExpandedChunk(BaseModel):
@@ -24,6 +30,17 @@ class ExpandedChunk(BaseModel):
     relation: str
     depth: int = 1
     path: list[str] = Field(default_factory=list)
+
+
+class EvidenceItem(BaseModel):
+    claim: str
+    document: str
+    section: str
+    condition: str = ""
+    value: str = ""
+    interpretation: str
+    supports_intent: bool
+    chunk_id: str
 
 
 class ContextExclusion(BaseModel):
@@ -55,6 +72,9 @@ class PipelineResult(BaseModel):
     retrieved: list[RetrievalResult] = Field(default_factory=list)
     expanded: list[ExpandedChunk] = Field(default_factory=list)
     results: list[RetrievalResult] = Field(default_factory=list)
+    query_plan: list[QueryAspect] = Field(default_factory=list)
+    answer_mode: str = "direct_supported"
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
     context_candidates: list[RetrievalResult] = Field(default_factory=list)
     context_included: list[RetrievalResult] = Field(default_factory=list)
     context_excluded: list[ContextExclusion] = Field(default_factory=list)

@@ -47,6 +47,9 @@ class RetrieverClient:
             "mode": options.get("mode", "hybrid"),
             "only_tables": options.get("only_tables"),
             "use_rewriter": options.get("use_rewriter", True),
+            "expand_refs": options.get("expand_refs", True),
+            "ref_depth": options.get("ref_depth", 1),
+            "answer_strategy": "auto",
             "filename_filter": options.get("filename_filter"),
             "section_filter": options.get("section_filter"),
         }

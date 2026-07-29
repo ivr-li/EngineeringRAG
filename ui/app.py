@@ -188,9 +188,10 @@ def _request_search(query: str) -> dict:
         session_id=get_auth_session_id(),
         rewrite_system_prompt=UIConfig.REWRITE_SYSTEM_PROMPT,
         compose_system_prompt=UIConfig.ANSWER_SYSTEM_PROMPT,
-        top_k=4,
-        prefetch_k=40,
+        top_k=6,
+        prefetch_k=80,
         mode="hybrid",
+        ref_depth=1,
     )
 
     return response
