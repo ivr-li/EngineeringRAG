@@ -17,7 +17,7 @@ MIN_WORDS_MERGE: int = 15  # merge gate: don't keep buffer below this
 OVERLAP_SENTENCES: int = 2  # sentences carried over to next window chunk
 
 _EXCLUDED_SECTION = re.compile(
-    r"исключен|утратил\s+силу|не\s+применяется",
+    r"\bисключ[её]н(?:о|а|ы)?\b|\bутратил\s+силу\b|\bне\s+применяется\b",
     re.IGNORECASE,
 )
 
@@ -26,11 +26,16 @@ _NOISE_HEADINGS = re.compile(
     r"предисловие|foreword|"
     r"библиография|bibliography|"
     r"^приложение\s*[а-яёa-z]?$|"
-    r"дата введения|"
-    r"термины и определения",
+    r"дата введения",
     re.IGNORECASE,
 )
 _FIGURE_CAPTION = re.compile(r"^\d+\s*[-–-]\s+\S+")
+_MD_HEADING_RE = re.compile(r"(?m)^(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$")
+_NUM_HEADING_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)*)(?=\s|$)")
+_CLAUSE_START_RE = re.compile(
+    r"(?m)^\s*(?:#{1,6}\s+)?(?P<number>\d+(?:\.\d+)+)(?=\s)"
+)
+_HTML_TABLE_BLOCK_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 _TECHEXPERT_WATERMARKS = [
     r"Внимание!\s*Документ\s*имеет\s*особый\s*порядок\s*вступления\s*в\s*силу\.[^\n]*\n?",
     r"Внимание!\s*Документ\s*включен\s*в\s*доказательную\s*базу\s*технического\s*регламента\.[^\n]*\n?",
@@ -71,6 +76,34 @@ _TABLE_CONTROL_FIELDS = (
     re.compile(r"\bTABLE_ORIENTATION\s*=\s*[a-z0-9_\-]+\s*[;|]?\s*", re.IGNORECASE),
     re.compile(r"\bTABLE_CAPTION\s*=\s*[^;|\n<]*\s*[;|]?\s*", re.IGNORECASE),
 )
+
+
+def norm_md_heads(text: str) -> str:
+    lines = [_norm_head_line(line) for line in text.splitlines()]
+    result = "\n".join(lines)
+
+    return result + ("\n" if text.endswith("\n") else "")
+
+
+def _norm_head_line(line: str) -> str:
+    match = _MD_HEADING_RE.match(line)
+    if not match:
+        return line
+
+    title = match.group("title").strip()
+    level = _head_level_for(title)
+    if level is None:
+        return line
+
+    return f"{'#' * level} {title}"
+
+
+def _head_level_for(title: str) -> int | None:
+    match = _NUM_HEADING_RE.match(title)
+    if not match:
+        return None
+
+    return min(match.group("number").count(".") + 1, 6)
 
 
 def attach_table_captions(text: str) -> str:
@@ -409,6 +442,8 @@ def _clean_text(text: str, headings: list[str]) -> str:
 
     if headings:
         for h in headings:
+            if _head_is_anchor(h):
+                continue
             nh = re.escape(_normalize(h))
             text = re.sub(rf"^{nh}\s*\n?", "", text, flags=re.MULTILINE)
 
@@ -417,11 +452,16 @@ def _clean_text(text: str, headings: list[str]) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"(\d)\s*[-–]\s*(\d)", r"\1–\2", text)
     text = re.sub(r"[|]{2,}", "", text)
+    text = _strip_table_control_text(text)
     text = re.sub(r"\bгНС\b|\bгнС\b|\bгНс\b", "ГНС", text)
     text = re.sub(r"\b([мМ])з\b", r"\1³", text)
     text = re.sub(r"\bмЗ\b", "м³", text, flags=re.IGNORECASE)
     text = re.sub(r"(?<=\|)\s*т\s*(?=\|)", " — ", text)
     return text.strip()
+
+
+def _head_is_anchor(heading: str) -> bool:
+    return bool(_NUM_HEADING_RE.match(_normalize(heading).strip()))
 
 
 def _strip_table_control_text(text: str) -> str:
@@ -555,24 +595,233 @@ def _is_noise(chunk: dict) -> bool:
     if chunk.get("is_table"):
         return False
 
+    if _leaf_is_excluded(chunk):
+        return True
+
+    if _has_norm_anchor(chunk):
+        return False
+
     if len(words) < MIN_WORDS:
         return True
 
-    for h in headings:
-        if _NOISE_HEADINGS.search(h):
-            return True
-        if _FIGURE_CAPTION.match(h):
-            return True
-
-    alpha_words = [re.sub(r"[^а-яёa-z]", "", w.lower()) for w in words]
-    short = sum(1 for w in alpha_words if len(w) <= 2)
-    if words and short / len(words) > 0.6:
+    if _leaf_is_noise(headings):
         return True
 
+    return _is_formula_noise(words)
+
+
+def _leaf_is_excluded(chunk: dict) -> bool:
     leaf = chunk.get("leaf_heading", "") or ""
-    if _EXCLUDED_SECTION.search(leaf):
+    if not _EXCLUDED_SECTION.search(leaf):
+        return False
+
+    if not _head_is_anchor(leaf):
         return True
-    return False
+
+    return bool(_EXCLUDED_SECTION.match(_anchor_body(leaf)))
+
+
+def _anchor_body(heading: str) -> str:
+    body = _NUM_HEADING_RE.sub("", _normalize(heading).strip(), count=1)
+
+    return body.strip(" .:-–—()")
+
+
+def _has_norm_anchor(chunk: dict) -> bool:
+    refs = chunk.get("anchor_refs") or []
+    if any(str(ref).startswith("section:") for ref in refs):
+        return True
+
+    return bool(_section_refs_from_text_starts(chunk.get("text", "")))
+
+
+def _leaf_is_noise(headings: list[str]) -> bool:
+    leaf = headings[-1] if headings else ""
+
+    return bool(_NOISE_HEADINGS.search(leaf) or _FIGURE_CAPTION.match(leaf))
+
+
+def _is_formula_noise(words: list[str]) -> bool:
+    alpha_words = [re.sub(r"[^а-яёa-z]", "", w.lower()) for w in words]
+    short = sum(1 for word in alpha_words if len(word) <= 2)
+
+    return bool(words and short / len(words) > 0.6)
+
+
+def repair_anchor_loss(
+    markdown: str,
+    chunks: list[dict],
+    filename: str | None = None,
+) -> list[dict]:
+    clauses = _source_clauses(markdown)
+    if not clauses:
+        return chunks
+
+    present = _chunk_anchor_set(chunks)
+    missing = [
+        clause for clause in clauses if f"section:{clause['number']}" not in present
+    ]
+    if not missing:
+        return _finalize_all(chunks)
+
+    recovered = _recover_clauses(missing, filename)
+    logging.warning(
+        "⨉⨉⨉ChunkCleaner.anchor_repair: %s recovered %s chunks for %s/%s missing clauses",
+        filename or "<unknown>",
+        len(recovered),
+        len(missing),
+        len(clauses),
+    )
+    return _finalize_all(chunks + recovered)
+
+
+def audit_anchor_coverage(markdown: str, chunks: list[dict]) -> dict[str, object]:
+    clauses = _source_clauses(markdown)
+    if not clauses:
+        return {"total": 0, "covered": 0, "missing": []}
+
+    present = _chunk_anchor_set(chunks)
+    missing = [
+        clause["number"]
+        for clause in clauses
+        if f"section:{clause['number']}" not in present
+    ]
+
+    return {
+        "total": len(clauses),
+        "covered": len(clauses) - len(missing),
+        "missing": missing,
+    }
+
+
+def _source_clauses(markdown: str) -> list[dict]:
+    text = norm_md_heads(markdown)
+    clauses: list[dict] = []
+
+    for number, start, end in _iter_clause_spans(text):
+        clause = _source_clause(text, number, start, end)
+        if not _clause_is_excluded(clause):
+            clauses.append(clause)
+
+    return clauses
+
+
+def _clause_is_excluded(clause: dict) -> bool:
+    heading = _clause_heading(clause)
+    if not _EXCLUDED_SECTION.search(heading):
+        return False
+
+    return bool(_EXCLUDED_SECTION.match(_anchor_body(heading)))
+
+
+def _iter_clause_spans(text: str) -> list[tuple[str, int, int]]:
+    matches = list(_CLAUSE_START_RE.finditer(text))
+    spans: list[tuple[str, int, int]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        spans.append((match.group("number"), match.start(), end))
+
+    return spans
+
+
+def _source_clause(text: str, number: str, start: int, end: int) -> dict:
+    clause_text = _clean_clause_text(text[start:end])
+
+    return {
+        "number": _normalize_ref_number(number),
+        "text": clause_text,
+        "headings": _infer_clause_heads(text, start),
+    }
+
+
+def _clean_clause_text(text: str) -> str:
+    text = _strip_html_tables(text)
+    text = re.sub(r"(?m)^#{1,6}\s+", "", text)
+    text = strip_watermarks(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
+def _strip_html_tables(text: str) -> str:
+    return _HTML_TABLE_BLOCK_RE.sub("\n", text)
+
+
+def _infer_clause_heads(markdown: str, offset: int) -> list[str]:
+    heads: list[str] = []
+    for match in _MD_HEADING_RE.finditer(markdown[:offset]):
+        level = len(match.group("marks"))
+        heads = _set_head_at_level(heads, level, match.group("title").strip())
+
+    return heads
+
+
+def _set_head_at_level(heads: list[str], level: int, title: str) -> list[str]:
+    next_heads = heads[: level - 1]
+    next_heads.append(title)
+
+    return next_heads
+
+
+def _chunk_anchor_set(chunks: list[dict]) -> set[str]:
+    refs: set[str] = set()
+    for chunk in chunks:
+        refs.update(_section_refs_from_text_starts(chunk.get("text", "")))
+        if not chunk.get("is_table"):
+            refs.update(_section_refs_from_headings(chunk))
+
+    return refs
+
+
+def _section_refs_from_headings(chunk: dict) -> list[str]:
+    refs: list[str] = []
+    for heading in _get_headings(chunk):
+        refs.extend(_section_refs_from_text_starts(heading))
+
+    return refs
+
+
+def _recover_clauses(clauses: list[dict], filename: str | None) -> list[dict]:
+    chunks = [_build_md_chunk(clause, filename) for clause in clauses if clause["text"]]
+    chunks = [_prepare_chunk(chunk) for chunk in chunks]
+    chunks = _split_with_overlap(chunks)
+    chunks = [_enrich_metadata(chunk) for chunk in chunks]
+
+    return [chunk for chunk in chunks if not _is_noise(chunk)]
+
+
+def _build_md_chunk(clause: dict, filename: str | None) -> dict:
+    heading = _clause_heading(clause)
+
+    return {
+        "filename": filename,
+        "text": clause["text"],
+        "raw_text": clause["text"],
+        "headings": _clause_heads(clause, heading),
+        "captions": [],
+        "doc_items": [],
+        "page_numbers": [],
+        "metadata": {"source": "markdown_anchor_repair"},
+        "is_table": False,
+    }
+
+
+def _clause_heading(clause: dict) -> str:
+    first_line = clause["text"].splitlines()[0] if clause["text"] else ""
+
+    return first_line or clause["number"]
+
+
+def _clause_heads(clause: dict, heading: str) -> list[str]:
+    heads = list(clause["headings"])
+    if not heads or heads[-1] != heading:
+        heads.append(heading)
+
+    return heads
+
+
+def _finalize_all(chunks: list[dict]) -> list[dict]:
+    return [_finalize_chunk(chunk, idx) for idx, chunk in enumerate(chunks)]
 
 
 def _merge_by_section(
@@ -612,7 +861,7 @@ def _merge_by_section(
             buffer["doc_items"].extend(chunk.get("doc_items", []))
             buffer["refs"] = list(set(buffer.get("refs", []) + chunk.get("refs", [])))
         else:
-            if len(buffer.get("text", "").split()) >= min_words:
+            if _keep_buffer(buffer, min_words):
                 result.append(buffer)
             buffer = {
                 **chunk,
@@ -622,9 +871,13 @@ def _merge_by_section(
                 "cross_refs": list(chunk.get("cross_refs", [])),
             }
 
-    if buffer and len(buffer.get("text", "").split()) >= min_words:
+    if buffer and _keep_buffer(buffer, min_words):
         result.append(buffer)
     return result
+
+
+def _keep_buffer(chunk: dict, min_words: int) -> bool:
+    return len(chunk.get("text", "").split()) >= min_words or _has_norm_anchor(chunk)
 
 
 def _prepare_chunk(chunk: dict) -> dict:
