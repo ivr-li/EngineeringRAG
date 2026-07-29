@@ -4,7 +4,18 @@ from app.pipeline.schemas import EvidenceItem, QueryAspect
 from app.schemas import RetrievalResult
 
 _WORD_RE = re.compile(r"[а-яёa-z0-9][а-яёa-z0-9.\-]*", re.IGNORECASE)
-_NUM_RE = re.compile(r"\b\d+(?:[,.]\d+)?\s*(?:мм|см|м|%|°C|кПа|сут|дн)\b")
+_UNIT_VALUE_RE = re.compile(
+    r"\b\d+(?:[,.]\d+)?\s*"
+    r"(?:мм|см|м|%|°C|°С|кПа|МПа|Па|сут|дн|кН|Н|т)\b",
+    re.IGNORECASE,
+)
+_DECIMAL_VALUE_RE = re.compile(r"(?<![\w])\d+[,.]\d+(?![\w])")
+_FORMULA_VALUE_RE = re.compile(
+    r"\b[а-яёa-z][а-яёa-z0-9_ '\-]{0,18}\s*"
+    r"(?:=|≤|>=|<=|<|>)\s*[^.;\n]{1,48}",
+    re.IGNORECASE,
+)
+_SEGMENT_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
 _STOP = {
     "какие",
     "какой",
@@ -90,8 +101,8 @@ def build_evidence(
                 claim=claim,
                 document=result.filename,
                 section=_section(result),
-                condition=result.leaf_heading or result.parent_heading or "",
-                value=", ".join(_num_values(result.text)),
+                condition=_condition(result, query),
+                value=", ".join(_num_values(result.text, query)),
                 interpretation=_interp(result, query),
                 supports_intent=_supports(result, query),
                 chunk_id=result.id,
@@ -183,17 +194,50 @@ def _claim_text(result: RetrievalResult) -> str:
     return text[:limit].strip()
 
 
-def _num_values(text: str) -> list[str]:
+def _num_values(text: str, query: str) -> list[str]:
     values: list[str] = []
     seen: set[str] = set()
 
-    for raw in _NUM_RE.findall(text):
-        value = raw.replace(",", ".")
-        if value not in seen:
-            values.append(value)
-            seen.add(value)
+    for snippet in _value_snippets(text, query):
+        for raw in _values_in(snippet):
+            value = _norm_value(raw)
+            if value not in seen:
+                values.append(value)
+                seen.add(value)
 
-    return values[:8]
+    return values[:10]
+
+
+def _value_snippets(text: str, query: str) -> list[str]:
+    segments = [
+        segment.strip() for segment in _SEGMENT_RE.split(text) if segment.strip()
+    ]
+    terms = _term_set(query)
+    if not segments or not terms:
+        return segments[:4]
+
+    matched = [
+        segment
+        for segment in segments
+        if any(_term_hit(term, segment.lower()) for term in terms)
+    ]
+
+    return matched or segments[:4]
+
+
+def _values_in(text: str) -> list[str]:
+    values: list[str] = []
+    values.extend(_UNIT_VALUE_RE.findall(text))
+    values.extend(_DECIMAL_VALUE_RE.findall(text))
+    values.extend(match.group(0) for match in _FORMULA_VALUE_RE.finditer(text))
+
+    return values
+
+
+def _norm_value(raw: str) -> str:
+    value = " ".join(raw.split()).replace(",", ".")
+
+    return value.strip(" ,;.")
 
 
 def _supports(result: RetrievalResult, query: str) -> bool:
@@ -281,6 +325,34 @@ def _interp(result: RetrievalResult, query: str) -> str:
 
 def _section(result: RetrievalResult) -> str:
     return result.section_path or result.leaf_heading or result.parent_heading or ""
+
+
+def _condition(result: RetrievalResult, query: str) -> str:
+    heading = result.leaf_heading or result.parent_heading or ""
+    snippet = _first_value_snippet(result.text, query)
+    if not snippet:
+        return heading
+
+    if heading and heading not in snippet:
+        return f"{heading}: {snippet}"
+
+    return snippet
+
+
+def _first_value_snippet(text: str, query: str) -> str:
+    for snippet in _value_snippets(text, query):
+        if _values_in(snippet):
+            return _clean_condition(snippet)
+
+    return ""
+
+
+def _clean_condition(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) <= 260:
+        return text
+
+    return text[:260].rsplit(" ", 1)[0].strip()
 
 
 def _doc_count(items: list[EvidenceItem]) -> int:

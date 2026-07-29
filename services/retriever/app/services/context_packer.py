@@ -127,7 +127,7 @@ def _select_candidates(
     seen: set[str] = set()
     primary_count = 0
 
-    for result in results:
+    for result in _ordered_candidates(results, terms, expanded_relations):
         if result.id in seen or not _allow_candidate(
             result, primary_count, terms, expanded_relations
         ):
@@ -143,6 +143,86 @@ def _select_candidates(
             break
 
     return candidates
+
+
+def _ordered_candidates(
+    results: list[RetrievalResult],
+    terms: set[str],
+    expanded_relations: dict[str, str],
+) -> list[RetrievalResult]:
+    primary = [result for result in results if result.id not in expanded_relations]
+    expanded = [result for result in results if result.id in expanded_relations]
+    direct, related = _split_direct(primary, terms)
+
+    return _diverse_first(direct) + expanded + _diverse_first(related)
+
+
+def _split_direct(
+    results: list[RetrievalResult],
+    terms: set[str],
+) -> tuple[list[RetrievalResult], list[RetrievalResult]]:
+    if not terms:
+        return results, []
+
+    direct: list[RetrievalResult] = []
+    related: list[RetrievalResult] = []
+    threshold = 0.45 if len(terms) >= 3 else 0.5
+
+    for result in results:
+        target = direct if _term_coverage(result, terms) >= threshold else related
+        target.append(result)
+
+    return direct, related
+
+
+def _diverse_first(results: list[RetrievalResult]) -> list[RetrievalResult]:
+    first: list[RetrievalResult] = []
+    rest: list[RetrievalResult] = []
+    seen_docs: set[str] = set()
+
+    for result in sorted(results, key=_candidate_sort_key):
+        doc_key = result.filename
+        if doc_key not in seen_docs:
+            first.append(result)
+            seen_docs.add(doc_key)
+        else:
+            rest.append(result)
+
+    return first + rest
+
+
+def _candidate_sort_key(result: RetrievalResult) -> tuple[float, int]:
+    index = result.chunk_index if result.chunk_index is not None else 10**9
+
+    return -result.score, index
+
+
+def _term_coverage(result: RetrievalResult, terms: set[str]) -> float:
+    text = _result_search_text(result).lower()
+    covered = [term for term in terms if _term_match(term, text)]
+
+    return len(covered) / len(terms)
+
+
+def _term_match(term: str, text: str) -> bool:
+    if term in text:
+        return True
+
+    return len(term) >= 5 and term[:5] in text
+
+
+def _result_search_text(result: RetrievalResult) -> str:
+    return " ".join(
+        [
+            result.text,
+            result.filename,
+            result.section_path,
+            result.parent_heading or "",
+            result.leaf_heading or "",
+            result.table_caption or "",
+            result.table_id or "",
+        ]
+    )
 
 
 def _allow_candidate(

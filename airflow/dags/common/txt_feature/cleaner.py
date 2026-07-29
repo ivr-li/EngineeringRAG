@@ -193,14 +193,24 @@ def _split_table_chunk(chunk: dict, max_tokens: int = MAX_TOKENS) -> list[dict]:
     return [chunk]
 
 
-def _enrich_table_metadata(chunk: dict) -> dict:
-    metadata = extract_table_metadata(chunk.get("text", ""))
+def _enrich_table_metadata(chunk: dict, source_text: str | None = None) -> dict:
+    metadata = extract_table_metadata(source_text or chunk.get("text", ""))
     if metadata.get("table_id"):
         chunk["is_table"] = True
     for key, value in metadata.items():
         if not chunk.get(key):
             chunk[key] = value
     return chunk
+
+
+def _table_source_text(chunk: dict) -> str:
+    raw_text = chunk.get("raw_text") or ""
+    text = chunk.get("text") or ""
+
+    if extract_table_metadata(raw_text).get("table_id"):
+        return raw_text
+
+    return text
 
 
 def _table_parts_from_texts(chunk: dict, texts: list[str]) -> list[dict]:
@@ -883,9 +893,10 @@ def _keep_buffer(chunk: dict, min_words: int) -> bool:
 def _prepare_chunk(chunk: dict) -> dict:
     chunk["headings"] = _get_headings(chunk)
     chunk["doc_items"] = chunk.get("doc_items") or []
-    chunk["text"] = _clean_text(chunk.get("text") or "", chunk["headings"])
+    source_text = _table_source_text(chunk)
+    _enrich_table_metadata(chunk, source_text)
 
-    _enrich_table_metadata(chunk)
+    chunk["text"] = _clean_text(source_text, chunk["headings"])
     if chunk.get("is_table"):
         chunk["text"] = _strip_table_control_text(chunk.get("text") or "")
 

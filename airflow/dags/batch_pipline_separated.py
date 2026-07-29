@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from collections import defaultdict
 from functools import lru_cache
@@ -24,6 +25,7 @@ QDRANT_VECTOR_SIZE = 1024
 QDRANT_ENCODE_BATCH = 16
 QDRANT_UPSERT_BATCH = 32
 QDRANT_COLBERT_SIZE = 1024
+TABLE_ID_RE = re.compile(r"\bTABLE_ID\s*=\s*(?P<table_id>[a-z0-9_\-]+)", re.IGNORECASE)
 
 
 # ============================================================
@@ -92,6 +94,42 @@ def read_s3_text(
 def batch_list(items: list, batch_size: int = BATCH_SIZE) -> list[list]:
     """Split a flat list into fixed-size chunks"""
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def chunk_text(chunk: dict) -> str:
+    return "\n".join(str(chunk.get(key) or "") for key in ("text", "raw_text"))
+
+
+def table_text_ids(chunks: list[dict]) -> set[str]:
+    ids: set[str] = set()
+    for chunk in chunks:
+        matches = TABLE_ID_RE.finditer(chunk_text(chunk))
+        ids.update(match.group("table_id") for match in matches)
+
+    return ids
+
+
+def table_payload_ids(chunks: list[dict]) -> set[str]:
+    return {chunk["table_id"] for chunk in chunks if chunk.get("table_id")}
+
+
+def validate_table_payload(
+    source_table_ids: set[str],
+    enriched_chunks: list[dict],
+    file_name: str,
+) -> None:
+    payload_ids = table_payload_ids(enriched_chunks)
+    missing_ids = sorted(source_table_ids - payload_ids)
+    logging.info(
+        f">>> Table metadata quality: file={file_name}, "
+        f"annotated_input={len(source_table_ids)}, payload_output={len(payload_ids)}"
+    )
+
+    if missing_ids:
+        raise ValueError(
+            f"Table metadata was lost for {file_name}: "
+            f"missing table_ids={missing_ids}"
+        )
 
 
 @lru_cache(maxsize=1)
@@ -505,7 +543,7 @@ def build_batch_pipeline(dag_id: str, mode: str):
 
                     for tc in table_chunks:
                         tc["is_table"] = True
-                        # Префикс помогает модели понять контекст при энкодинге
+                        # The prefix preserves table context during embedding.
                         tc["text"] = f"[ТАБЛИЦА] {tc.get('text', '')}"
 
                     logging.info(
@@ -513,7 +551,12 @@ def build_batch_pipeline(dag_id: str, mode: str):
                         f"file={file_name}, task_id={task_id}"
                     )
                     try:
-                        all_enriched = process_chunks(text_chunks + table_chunks)
+                        source_chunks = text_chunks + table_chunks
+                        source_table_ids = table_text_ids(source_chunks)
+                        all_enriched = process_chunks(source_chunks)
+                        validate_table_payload(
+                            source_table_ids, all_enriched, file_name
+                        )
                         source_md = read_s3_text(
                             hook_minio,
                             f"{DEV_DATA_MINERU_MD}/{Path(file_name).name}",
