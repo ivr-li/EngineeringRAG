@@ -104,6 +104,7 @@ services:
         depends_on:
             postgres:
                 condition: service_healthy
+                required: false
         healthcheck:
             test:
                 - CMD-SHELL
@@ -146,10 +147,13 @@ services:
         depends_on:
             postgres:
                 condition: service_healthy
+                required: false
             minio:
                 condition: service_healthy
+                required: false
             qdrant:
                 condition: service_started
+                required: false
             vllm-light:
                 condition: service_healthy
         healthcheck:
@@ -235,6 +239,8 @@ services:
             - 8000:8000
         environment:
             MINERU_MODEL_SOURCE: local
+            MINERU_API_MAX_CONCURRENT_REQUESTS: ${MINERU_API_MAX_CONCURRENT_REQUESTS:-2}
+            MINERU_PROCESSING_WINDOW_SIZE: ${MINERU_PROCESSING_WINDOW_SIZE:-32}
         entrypoint: mineru-api
         command: --host 0.0.0.0 --port 8000
         ulimits:

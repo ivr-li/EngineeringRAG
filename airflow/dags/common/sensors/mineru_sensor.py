@@ -4,7 +4,7 @@ import asyncio
 from typing import Any, AsyncIterator
 
 from airflow.providers.http.hooks.http import HttpHook
-from airflow.sdk import BaseOperator, BaseSensorOperator, Context  # noqa: F401
+from airflow.sdk import BaseSensorOperator, Context
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 from asgiref.sync import sync_to_async
 
@@ -32,11 +32,13 @@ class MineruBatchTrigger(BaseTrigger):
         task_ids: list[str],
         conn_id: str = "mineru",
         poll_interval: int = 60,
+        missing_limit: int = 3,
     ):
         super().__init__()
         self.task_ids = task_ids
         self.conn_id = conn_id
         self.poll_interval = poll_interval
+        self.missing_limit = missing_limit
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """
@@ -57,6 +59,7 @@ class MineruBatchTrigger(BaseTrigger):
                 "task_ids": self.task_ids,
                 "conn_id": self.conn_id,
                 "poll_interval": self.poll_interval,
+                "missing_limit": self.missing_limit,
             },
         )
 
@@ -83,7 +86,7 @@ class MineruBatchTrigger(BaseTrigger):
         resp = hook.run(f"/tasks/{task_id}")
 
         if resp.status_code == 404:
-            return {"status": "failed", "reason": "task_not_found"}
+            return {"status": "missing", "reason": "task_not_found"}
 
         return resp.json()
 
@@ -110,6 +113,7 @@ class MineruBatchTrigger(BaseTrigger):
         self.log.info(f"===== Task IDs to monitor: {self.task_ids}")
         pending = list(self.task_ids)
         completed_results = {}
+        missing_counts: dict[str, int] = {}
 
         while pending:
             checks = await asyncio.gather(
@@ -123,13 +127,26 @@ class MineruBatchTrigger(BaseTrigger):
                     continue
 
                 status = result.get("status")
+                if status == "missing":
+                    count = missing_counts.get(task_id, 0) + 1
+                    missing_counts[task_id] = count
+                    self.log.warning(
+                        f"----- Task {task_id} not found ({count}/{self.missing_limit})"
+                    )
+
+                    if count < self.missing_limit:
+                        continue
+
+                    yield TriggerEvent(
+                        {
+                            "status": "failed",
+                            "error": f"MinerU task {task_id} failed: task_not_found",
+                        }
+                    )
+                    return
+
                 if status == "failed":
                     failure_reason = result.get("reason", "remote_failure")
-
-                    if failure_reason == "task_not_found":
-                        self.log.error(
-                            f"----- Task {task_id} not found (pod restart). Marking failed."
-                        )
 
                     yield TriggerEvent(
                         {
