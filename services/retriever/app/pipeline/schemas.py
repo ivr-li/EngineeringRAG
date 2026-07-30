@@ -41,6 +41,15 @@ class EvidenceItem(BaseModel):
     interpretation: str
     supports_intent: bool
     chunk_id: str
+    source_stage: str = "primary"
+    relation: str = ""
+    support_score: float = 0.0
+
+
+class EvidenceGroup(BaseModel):
+    name: str
+    description: str
+    chunk_ids: list[str] = Field(default_factory=list)
 
 
 class ContextExclusion(BaseModel):
@@ -74,11 +83,14 @@ class PipelineResult(BaseModel):
     results: list[RetrievalResult] = Field(default_factory=list)
     query_plan: list[QueryAspect] = Field(default_factory=list)
     answer_mode: str = "direct_supported"
+    answer_mode_reason: str = ""
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    evidence_groups: list[EvidenceGroup] = Field(default_factory=list)
     context_candidates: list[RetrievalResult] = Field(default_factory=list)
     context_included: list[RetrievalResult] = Field(default_factory=list)
     context_excluded: list[ContextExclusion] = Field(default_factory=list)
     context_text: str = ""
+    context_stats: dict[str, int] = Field(default_factory=dict)
     answer: str | None = None
     timings: PipelineTimings = Field(default_factory=PipelineTimings)
     error: str | None = None

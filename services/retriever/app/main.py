@@ -12,15 +12,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.pipeline.schemas import PipelineResult
 from app.pipeline.search_pipeline import SearchPipeline
-from app.schemas import (
-    LLMConfig,
-    QueryTrace,
-    RetrievalResult,
-    RetrievedChunkTrace,
-    SearchRequest,
-    SearchResponse,
-)
-from app.services import (
+from app.pipeline.services import (
     MinioTraceLogger,
     PGTraceLogger,
     QdrantRetriever,
@@ -28,6 +20,14 @@ from app.services import (
     compose_answer,
     get_bge_m3,
     rewrite_query,
+)
+from app.schemas import (
+    LLMConfig,
+    QueryTrace,
+    RetrievalResult,
+    RetrievedChunkTrace,
+    SearchRequest,
+    SearchResponse,
 )
 
 log = structlog.get_logger(__name__)

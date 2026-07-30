@@ -190,7 +190,7 @@ services:
             - --gpu-memory-utilization
             - ${VLLM_GPU_MEMORY_UTILIZATION:-0.75}
             - --max-model-len
-            - ${VLLM_MAX_MODEL_LEN:-16000}
+            - ${VLLM_MAX_MODEL_LEN:-20000}
             - --max-num-seqs
             - ${VLLM_MAX_NUM_SEQS:-2}
             - --reasoning-parser

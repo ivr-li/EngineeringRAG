@@ -813,7 +813,14 @@ def batch_pipeline():
 
         import torch
         from qdrant_client import QdrantClient
-        from qdrant_client.models import PointStruct, SparseVector
+        from qdrant_client.models import (
+            FieldCondition,
+            Filter,
+            FilterSelector,
+            MatchValue,
+            PointStruct,
+            SparseVector,
+        )
 
         # Диагностика GPU
         providers = (
@@ -843,6 +850,21 @@ def batch_pipeline():
                 logging.warning(f">>> Empty chunk list in {json_path}, skip")
                 continue
 
+            filename = chunks[0].get("filename") or path.stem
+            client.delete(
+                collection_name=QDRANT_COLLECTION,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="filename",
+                                match=MatchValue(value=filename),
+                            )
+                        ]
+                    )
+                ),
+                wait=True,
+            )
             logging.info(f">>> Processing {len(chunks)} chunks from {path.name}")
 
             # -----Iterate in QDRANT_ENCODE_BATCH sized windows -----
@@ -878,7 +900,7 @@ def batch_pipeline():
 
                 # ----- 3) Build PointStruct list -----
                 points: list[PointStruct] = []
-                for i, chunk in enumerate(enc_batch):
+                for i, chunk in enumerate(valid_chunks):
                     # Deterministic UUID from filename + chunk_index so re-runs
                     # overwrite the same point instead of creating duplicates.
                     point_id = str(
@@ -944,10 +966,11 @@ def batch_pipeline():
                     total_upserted += len(sub)
                     logging.info(
                         f">>> Upserted {len(sub)} points(file={path.name},"
-                        "enc_offset={enc_start},"
-                        "ups_offset={ups_start})"
+                        f"enc_offset={enc_start},"
+                        f"ups_offset={ups_start})"
                     )
                 del dense_vecs, lexical_vecs, colbert_vecs, points, enc_batch
+                del valid_chunks
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

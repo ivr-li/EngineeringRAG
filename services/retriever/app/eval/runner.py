@@ -13,8 +13,8 @@ from app.metrics.generation import GenerationMetricCalculator
 from app.metrics.retrieval import calculate_retrieval_metrics
 from app.metrics.schemas import EvalQuestion
 from app.pipeline.search_pipeline import SearchPipeline
+from app.pipeline.services import QdrantRetriever, compose_answer, rewrite_query
 from app.schemas import LLMConfig, SearchRequest
-from app.services import QdrantRetriever, compose_answer, rewrite_query
 
 
 class EvalRunner:

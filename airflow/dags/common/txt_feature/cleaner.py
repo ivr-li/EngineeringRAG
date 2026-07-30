@@ -69,6 +69,10 @@ _APPENDIX_REF_RE = re.compile(r"\bприложени[еяй]\s*(?P<code>[А-ЯA-
 _SECTION_ANCHOR_RE = re.compile(r"(?m)^\s*(?P<number>\d+(?:\.\d+)+)(?=\s)")
 _TABLE_ID_NUMBER_RE = re.compile(r"table[_-](?P<number>\d+(?:[_\.]\d+)*)", re.IGNORECASE)
 _TABLE_CONTROL_MARKER_RE = re.compile(r"\[/?TABLE_(?:BEGIN|END)\]", re.IGNORECASE)
+_TABLE_TEXT_MARKER_RE = re.compile(
+    r"Заголовки\s+таблицы:|Строки\s+таблицы:",
+    re.IGNORECASE,
+)
 _TABLE_CONTROL_FIELDS = (
     re.compile(r"\bTABLE_ID\s*=\s*[a-z0-9_\-]+\s*[;|]?\s*", re.IGNORECASE),
     re.compile(r"\bTABLE_PART\s*=\s*\d+\s*/\s*\d+\s*[;|]?\s*", re.IGNORECASE),
@@ -175,28 +179,40 @@ def _enrich_metadata(chunk: dict) -> dict:
 def _split_table_chunk(chunk: dict, max_tokens: int = MAX_TOKENS) -> list[dict]:
     chunk = _enrich_table_metadata(chunk)
     text = chunk.get("text", "")
+    split_budget = _table_split_budget(chunk, max_tokens)
 
-    html_parts = split_html_table_text(text, max_tokens, _count_tokens)
+    html_parts = split_html_table_text(text, split_budget, _count_tokens)
     if html_parts:
         return _table_parts_from_texts(chunk, html_parts)
 
     if _count_tokens(text) <= max_tokens:
         return [chunk]
 
-    markdown_parts = _split_markdown_table_text(text, max_tokens)
-    if markdown_parts:
-        return _table_parts_from_texts(chunk, markdown_parts)
-
-    plain_parts = _split_plain_table_text(text, max_tokens)
+    plain_parts = _split_plain_table_text(text, split_budget)
     if plain_parts:
         return _table_parts_from_texts(chunk, plain_parts)
+
+    if not _has_table_text_marker(text):
+        markdown_parts = _split_markdown_table_text(text, split_budget)
+        if markdown_parts:
+            return _table_parts_from_texts(chunk, markdown_parts)
     return [chunk]
 
 
+def _table_split_budget(chunk: dict, max_tokens: int) -> int:
+    label_tokens = _count_tokens(_table_window_label(chunk, "", 0, 1))
+
+    return max(80, max_tokens - label_tokens - 24)
+
+
 def _enrich_table_metadata(chunk: dict, source_text: str | None = None) -> dict:
-    metadata = extract_table_metadata(source_text or chunk.get("text", ""))
+    text = source_text or chunk.get("text", "")
+    metadata = extract_table_metadata(text)
     if metadata.get("table_id"):
         chunk["is_table"] = True
+    elif _has_table_text_marker(text):
+        chunk["is_table"] = True
+
     for key, value in metadata.items():
         if not chunk.get(key):
             chunk[key] = value
@@ -207,10 +223,14 @@ def _table_source_text(chunk: dict) -> str:
     raw_text = chunk.get("raw_text") or ""
     text = chunk.get("text") or ""
 
-    if extract_table_metadata(raw_text).get("table_id"):
+    if extract_table_metadata(raw_text).get("table_id") or _has_table_text_marker(raw_text):
         return raw_text
 
     return text
+
+
+def _has_table_text_marker(text: str) -> bool:
+    return bool(_TABLE_TEXT_MARKER_RE.search(text or ""))
 
 
 def _table_parts_from_texts(chunk: dict, texts: list[str]) -> list[dict]:
@@ -303,17 +323,144 @@ def _split_plain_table_text(text: str, max_tokens: int) -> list[str]:
     header, rows, footer = _plain_table_sections(text.splitlines())
     if not rows:
         return []
+    rows = _split_long_plain_rows(header, rows, footer, max_tokens)
     row_groups = _window_plain_rows(header, rows, footer, max_tokens)
     return ["\n".join(header + group + footer) for group in row_groups]
+
+
+def _split_long_plain_rows(
+    header: list[str],
+    rows: list[str],
+    footer: list[str],
+    max_tokens: int,
+) -> list[str]:
+    overhead = _count_tokens("\n".join(header + footer))
+    row_budget = max(40, max_tokens - overhead)
+    result: list[str] = []
+
+    for row in rows:
+        if _count_tokens(row) <= row_budget:
+            result.append(row)
+        else:
+            result.extend(_split_plain_row(row, row_budget))
+
+    return result
+
+
+def _split_plain_row(row: str, max_tokens: int) -> list[str]:
+    units, separator = _plain_row_units(row)
+    if len(units) <= 1:
+        return _split_words(row, max_tokens)
+
+    return _pack_row_units(units, separator, max_tokens)
+
+
+def _plain_row_units(row: str) -> tuple[list[str], str]:
+    units = [unit.strip() for unit in re.split(r";\s*", row) if unit.strip()]
+    if len(units) > 1:
+        return units, "; "
+
+    return [unit.strip() for unit in row.split(" | ") if unit.strip()], " | "
+
+
+def _pack_row_units(units: list[str], separator: str, max_tokens: int) -> list[str]:
+    result: list[str] = []
+    current: list[str] = []
+
+    for unit in units:
+        candidate = separator.join([*current, unit])
+        if current and _count_tokens(candidate) > max_tokens:
+            result.append(separator.join(current))
+            current = [unit]
+        else:
+            current.append(unit)
+
+    if current:
+        result.append(separator.join(current))
+    return result
+
+
+def _split_words(text: str, max_tokens: int) -> list[str]:
+    words = text.split()
+    result: list[str] = []
+    current: list[str] = []
+
+    for word in words:
+        candidate = " ".join([*current, word])
+        if current and _count_tokens(candidate) > max_tokens:
+            result.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+
+    if current:
+        result.append(" ".join(current))
+    return result
 
 
 def _plain_table_sections(lines: list[str]) -> tuple[list[str], list[str], list[str]]:
     row_marker = _find_line(lines, "Строки таблицы:")
     end_marker = _find_line(lines, "[TABLE_END]")
+    header_marker = _find_line(lines, "Заголовки таблицы:")
     if row_marker is None:
-        return [], [], []
+        return _infer_plain_table_sections(lines, header_marker, end_marker)
+
     data_end = end_marker if end_marker is not None else len(lines)
-    return lines[: row_marker + 1], lines[row_marker + 1 : data_end], lines[data_end:]
+    header = lines[: row_marker + 1]
+    rows = lines[row_marker + 1 : data_end]
+    footer = lines[data_end:]
+
+    return _rebalance_plain_header(header, rows, footer)
+
+
+def _infer_plain_table_sections(
+    lines: list[str],
+    header_marker: int | None,
+    end_marker: int | None,
+) -> tuple[list[str], list[str], list[str]]:
+    if header_marker is None:
+        return [], [], []
+
+    data_end = end_marker if end_marker is not None else len(lines)
+    row_start = _infer_row_start(lines, header_marker + 1, data_end)
+    if row_start is None:
+        return [], [], []
+
+    header = [*lines[:row_start], "Строки таблицы:"]
+    return header, lines[row_start:data_end], lines[data_end:]
+
+
+def _rebalance_plain_header(
+    header: list[str],
+    rows: list[str],
+    footer: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    if _count_tokens("\n".join(header)) <= MAX_TOKENS // 2:
+        return header, rows, footer
+
+    row_start = _infer_row_start(header, 0, len(header))
+    if row_start is None or row_start >= len(header) - 1:
+        return header, rows, footer
+
+    new_header = [*header[:row_start], "Строки таблицы:"]
+    return new_header, header[row_start:-1] + rows, footer
+
+
+def _infer_row_start(lines: list[str], start: int, end: int) -> int | None:
+    for index in range(start, end):
+        if _looks_plain_data_line(lines[index]):
+            return index
+
+    return None
+
+
+def _looks_plain_data_line(line: str) -> bool:
+    cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+    if len(cells) < 2:
+        return False
+
+    value_cells = sum(bool(re.search(r"\d|[-−+]|≤|>=|<=|>|<", cell)) for cell in cells[1:])
+    return value_cells >= 2
 
 
 def _window_plain_rows(
@@ -831,7 +978,26 @@ def _clause_heads(clause: dict, heading: str) -> list[str]:
 
 
 def _finalize_all(chunks: list[dict]) -> list[dict]:
+    _normalize_table_windows(chunks)
+
     return [_finalize_chunk(chunk, idx) for idx, chunk in enumerate(chunks)]
+
+
+def _normalize_table_windows(chunks: list[dict]) -> None:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for chunk in chunks:
+        table_id = chunk.get("table_id")
+        if not table_id:
+            continue
+
+        key = (str(chunk.get("filename") or ""), str(table_id))
+        groups.setdefault(key, []).append(chunk)
+
+    for group in groups.values():
+        total = len(group)
+        for index, chunk in enumerate(group, start=1):
+            chunk["table_window_index"] = index
+            chunk["table_window_total"] = total
 
 
 def _merge_by_section(
@@ -921,24 +1087,6 @@ def _finalize_chunk(chunk: dict, index: int) -> dict:
 
 
 def process_chunks(chunks: list[dict]) -> list[dict]:
-    """
-    A pipeline for cleaning chanks by a single document.
-
-    Steps
-    -----
-    1. clean_text      – strip OCR artefacts
-    2. extract_refs    – (re)compute man_refs / cross_refs
-    3. merge_by_section – pack micro-chunks within section budget
-    4. split_with_overlap – break oversized chunks with sentence overlap
-    5. enrich_metadata – add section_path / section_level / etc.
-    6. filter noise    – drop garbage (tables are immune)
-    7. reindex         – recalculate chunk_index / num_tokens
-
-    Returns
-    -------
-    list[dict]
-        A cleaned list of chunks ready for indexing.
-    """
     before = len(chunks)
 
     # Step 1 - 2
@@ -951,8 +1099,7 @@ def process_chunks(chunks: list[dict]) -> list[dict]:
     chunks = [_enrich_metadata(c) for c in chunks]
     # Step 6
     chunks = [c for c in chunks if not _is_noise(c)]
-    # Step 7
-    chunks = [_finalize_chunk(c, idx) for idx, c in enumerate(chunks)]
+    chunks = _finalize_all(chunks)
 
     logging.info(
         f"⨠⨠⨠ChunkCleaner.process: {before} → {len(chunks)} chunks "
