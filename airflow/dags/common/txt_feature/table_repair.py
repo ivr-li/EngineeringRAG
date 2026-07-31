@@ -5,9 +5,18 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
-_CAPTION_RE = re.compile(r"^\s*(Таблица\s+\d+(?:\.\d+)?[^\n]*)\s*$", re.IGNORECASE)
+_CAPTION_RE = re.compile(
+    r"\b(Таблица\s+(?:[А-ЯA-Z]\.?\d+(?:\.\d+)*|\d+(?:\.\d+)*)"
+    r"(?:\s*[-–—]\s*[^\n]+)?)",
+    re.IGNORECASE,
+)
 _FRAGMENT_RE = re.compile(r"фрагмент\s+таблицы|част[ьи]\s+\d+", re.IGNORECASE)
 _PAGE_RE = re.compile(r"Страница\s+\d+", re.IGNORECASE)
+_TABLE_BOILERPLATE_RE = re.compile(
+    r"ИС\s+«Техэксперт|Внимание!|Примечание\s+изготовителя|"
+    r"^\*Вероятно,\s+ошибка\s+оригинала",
+    re.IGNORECASE,
+)
 _TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 _TABLE_ID_RE = re.compile(r"TABLE_ID\s*=\s*([a-z0-9_\-]+)", re.IGNORECASE)
 _TABLE_PART_RE = re.compile(r"TABLE_PART\s*=\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
@@ -32,12 +41,20 @@ class HTMLTableParser(HTMLParser):
         self.rows: list[list[str]] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
+        self._cell_colspan = 1
+        self._cell_rowspan = 1
+        self._col_index = 0
+        self._spans: dict[int, tuple[int, str]] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "tr":
             self._row = []
+            self._col_index = 0
         elif tag in {"td", "th"} and self._row is not None:
+            self._fill_spans_to_next_cell()
             self._cell = []
+            self._cell_colspan = _span_attr(attrs, "colspan")
+            self._cell_rowspan = _span_attr(attrs, "rowspan")
 
     def handle_data(self, data: str) -> None:
         if self._cell is not None:
@@ -45,12 +62,45 @@ class HTMLTableParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"td", "th"} and self._cell is not None and self._row is not None:
-            self._row.append(_clean_cell("".join(self._cell)))
+            self._append_cell(_clean_cell("".join(self._cell)))
             self._cell = None
         elif tag == "tr" and self._row is not None:
+            self._fill_spans_to_row_end()
             if any(cell for cell in self._row):
                 self.rows.append(self._row)
             self._row = None
+
+    def _append_cell(self, value: str) -> None:
+        start = self._col_index
+        for _ in range(self._cell_colspan):
+            self._row.append(value)
+            self._col_index += 1
+
+        if self._cell_rowspan > 1:
+            for col in range(start, start + self._cell_colspan):
+                self._spans[col] = (self._cell_rowspan - 1, value)
+
+    def _fill_spans_to_next_cell(self) -> None:
+        while self._col_index in self._spans:
+            self._append_span_cell(self._col_index)
+
+    def _fill_spans_to_row_end(self) -> None:
+        while self._spans and self._col_index <= max(self._spans):
+            if self._col_index in self._spans:
+                self._append_span_cell(self._col_index)
+            else:
+                self._row.append("")
+                self._col_index += 1
+
+    def _append_span_cell(self, col: int) -> None:
+        remaining, value = self._spans[col]
+        self._row.append(value)
+        self._col_index += 1
+
+        if remaining > 1:
+            self._spans[col] = (remaining - 1, value)
+        else:
+            del self._spans[col]
 
 
 def repair_split_tables(markdown: str) -> str:
@@ -161,6 +211,7 @@ def _window_table_rows(
     data_rows: list[list[str]],
     max_tokens: int,
 ) -> list[list[list[str]]]:
+    data_rows = [row for row in data_rows if not _is_boilerplate_row(row)]
     windows: list[list[list[str]]] = []
     current: list[list[str]] = []
     for row in data_rows:
@@ -186,9 +237,9 @@ def _format_docling_table_window(
         "[TABLE_BEGIN]",
         _metadata_text(metadata, window_index, window_total),
         "Заголовки таблицы:",
-        _rows_to_text(header_rows),
+        _format_header_rows(header_rows),
         "Строки таблицы:",
-        _rows_to_text(data_rows),
+        _format_data_rows(header_rows, data_rows),
         "[TABLE_END]",
     ]
     return "\n".join(block for block in blocks if block).strip()
@@ -282,6 +333,7 @@ def _merge_vertical_fragments(html_fragments: list[str]) -> list[list[list[str]]
         if not rows:
             continue
         if tables and _can_merge_vertically(tables[-1], rows):
+            tables[-1], rows = _align_fragment_widths(tables[-1], rows)
             tables[-1].extend(_drop_repeated_header(tables[-1], rows))
         else:
             tables.append(rows)
@@ -343,23 +395,93 @@ def _format_table_text(
     data_rows: list[list[str]],
     suffix: str,
 ) -> str:
-    blocks = [prefix, "Заголовки таблицы:", _rows_to_text(header_rows)]
-    blocks.extend(["Строки таблицы:", _rows_to_text(data_rows), suffix])
+    blocks = [prefix, "Заголовки таблицы:", _format_header_rows(header_rows)]
+    blocks.extend(["Строки таблицы:", _format_data_rows(header_rows, data_rows), suffix])
     return "\n".join(block for block in blocks if block).strip()
 
 
 def _split_header_rows(rows: list[list[str]]) -> tuple[list[list[str]], list[list[str]]]:
     meta_rows = 1 if rows and _has_table_meta(rows[0]) else 0
-    header_count = min(len(rows), meta_rows + 4)
-    if header_count == len(rows):
-        header_count = max(1, len(rows) - 1)
+    header_count = meta_rows + _header_body_count(rows[meta_rows:])
+
+    if header_count >= len(rows):
+        header_count = max(meta_rows + 1, len(rows) - 1)
     return rows[:header_count], rows[header_count:]
+
+
+def _header_body_count(rows: list[list[str]]) -> int:
+    if len(rows) <= 1:
+        return len(rows)
+
+    width = _dominant_width(rows)
+    saw_numbers = False
+    for index, row in enumerate(rows[: min(len(rows) - 1, 30)]):
+        next_row = rows[index + 1] if index + 1 < len(rows) else []
+        if _is_column_number_row(row):
+            saw_numbers = True
+            continue
+
+        if _starts_data_block(row, next_row, width, saw_numbers):
+            return max(1, index)
+
+    return min(4, len(rows) - 1)
+
+
+def _starts_data_block(
+    row: list[str],
+    next_row: list[str],
+    width: int,
+    saw_numbers: bool,
+) -> bool:
+    if _is_data_row(row, width, saw_numbers):
+        return True
+
+    return _is_group_row(row) and _is_data_row(next_row, width, saw_numbers)
 
 
 def _can_merge_vertically(base: list[list[str]], rows: list[list[str]]) -> bool:
     base_width = _dominant_width(base)
     rows_width = _dominant_width(rows)
-    return base_width > 0 and base_width == rows_width
+    if base_width <= 0 or rows_width <= 0:
+        return False
+
+    if base_width == rows_width:
+        return True
+
+    return _can_merge_header_data(base, rows, base_width, rows_width)
+
+
+def _can_merge_header_data(
+    base: list[list[str]],
+    rows: list[list[str]],
+    base_width: int,
+    rows_width: int,
+) -> bool:
+    if rows_width <= base_width or rows_width - base_width > 4:
+        return False
+
+    return _looks_header_fragment(base, base_width) and _is_data_row(
+        rows[0], rows_width, False
+    )
+
+
+def _looks_header_fragment(rows: list[list[str]], width: int) -> bool:
+    data_like = sum(_is_data_row(row, width, False) for row in rows)
+
+    return data_like <= max(1, len(rows) // 5)
+
+
+def _align_fragment_widths(
+    base: list[list[str]],
+    rows: list[list[str]],
+) -> tuple[list[list[str]], list[list[str]]]:
+    target_width = max(_dominant_width(base), _dominant_width(rows))
+
+    return _pad_rows(base, target_width), _pad_rows(rows, target_width)
+
+
+def _pad_rows(rows: list[list[str]], target_width: int) -> list[list[str]]:
+    return [row + [""] * max(0, target_width - len(row)) for row in rows]
 
 
 def _drop_repeated_header(
@@ -381,6 +503,133 @@ def _rows_to_text(rows: list[list[str]]) -> str:
     return "\n".join(" | ".join(cell for cell in row if cell) for row in rows)
 
 
+def _format_data_rows(
+    header_rows: list[list[str]],
+    data_rows: list[list[str]],
+) -> str:
+    headers = _flatten_headers(header_rows)
+    if not _use_key_value_rows(headers, data_rows):
+        return _rows_to_text(data_rows)
+
+    return "\n".join(_format_key_value_row(headers, row) for row in data_rows)
+
+
+def _format_header_rows(header_rows: list[list[str]]) -> str:
+    width = max((len(row) for row in header_rows), default=0)
+    if width >= 8 and len(header_rows) > 2:
+        return " | ".join(_flatten_headers(header_rows))
+
+    return _rows_to_text(header_rows)
+
+
+def _flatten_headers(header_rows: list[list[str]]) -> list[str]:
+    width = max((len(row) for row in header_rows), default=0)
+    headers: list[str] = []
+
+    for col in range(width):
+        parts = _header_col_parts(header_rows, col)
+        headers.append(_short_header(" ".join(parts)) or f"колонка {col + 1}")
+
+    return headers
+
+
+def _header_col_parts(header_rows: list[list[str]], col: int) -> list[str]:
+    parts: list[str] = []
+    for row in header_rows:
+        cell = row[col] if col < len(row) else ""
+        if cell and cell not in parts and not _looks_column_number_cell(cell):
+            parts.append(cell)
+
+    return parts
+
+
+def _use_key_value_rows(headers: list[str], data_rows: list[list[str]]) -> bool:
+    if len(headers) < 5:
+        return False
+
+    widths = [len(row) for row in data_rows if len(row) >= 4]
+    return bool(widths and max(widths) >= min(len(headers), 5))
+
+
+def _format_key_value_row(headers: list[str], row: list[str]) -> str:
+    if _is_group_row(row):
+        return _group_row_text(row)
+
+    if len([cell for cell in row if cell]) <= 1:
+        return " | ".join(cell for cell in row if cell)
+
+    pairs = [
+        f"{headers[index]}={cell}"
+        for index, cell in enumerate(row[: len(headers)])
+        if cell
+    ]
+    return "; ".join(pairs)
+
+
+def _short_header(value: str, limit: int = 42) -> str:
+    value = _clean_cell(value)
+    if len(value) <= limit:
+        return value
+
+    return value[:limit].rsplit(" ", 1)[0].strip() or value[:limit]
+
+
+def _is_data_row(row: list[str], width: int, saw_numbers: bool) -> bool:
+    nonempty = [cell for cell in row if cell]
+    if len(nonempty) < 2 or _is_column_number_row(row):
+        return False
+
+    if saw_numbers and len(row) >= max(2, width // 2):
+        return True
+
+    value_count = _numeric_cell_count(row[1:])
+    min_values = max(2, len(nonempty) // 2)
+
+    return len(row) >= max(2, width // 2) and value_count >= min_values
+
+
+def _is_group_row(row: list[str]) -> bool:
+    nonempty = [cell for cell in row if cell]
+    if len(nonempty) == 1:
+        return _is_group_cell(nonempty[0])
+
+    unique = {_clean_cell(cell).lower() for cell in nonempty}
+    return len(unique) == 1 and _is_group_cell(nonempty[0])
+
+
+def _is_group_cell(cell: str) -> bool:
+    return not _looks_column_number_cell(cell) and not re.search(
+        r"\d|≤|>=|<=|>|<",
+        cell,
+    )
+
+
+def _group_row_text(row: list[str]) -> str:
+    for cell in row:
+        if cell:
+            return cell
+
+    return ""
+
+
+def _is_column_number_row(row: list[str]) -> bool:
+    nonempty = [cell for cell in row if cell]
+    return bool(nonempty) and all(_looks_column_number_cell(cell) for cell in nonempty)
+
+
+def _looks_column_number_cell(cell: str) -> bool:
+    value = _clean_cell(cell).strip(".")
+    return bool(re.fullmatch(r"\d+|[IVXLCDM]+", value, re.IGNORECASE))
+
+
+def _numeric_cell_count(row: list[str]) -> int:
+    return sum(bool(re.search(r"\d|≤|>=|<=|>|<", cell)) for cell in row)
+
+
+def _is_boilerplate_row(row: list[str]) -> bool:
+    return bool(_TABLE_BOILERPLATE_RE.search(" ".join(row)))
+
+
 def _drop_metadata_rows(rows: list[list[str]]) -> list[list[str]]:
     return [row for row in rows if not _has_table_meta(row)]
 
@@ -390,22 +639,59 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _caption_from_line(line: str) -> str | None:
-    match = _CAPTION_RE.match(line.strip())
-    return match.group(1).strip() if match else None
+    text = line.strip()
+    match = _CAPTION_RE.search(text)
+    if not match:
+        return None
+
+    prefix = text[: match.start()].strip()
+    if prefix and not re.match(r"^\d+(?:\.\d+)*\s+\S+", prefix):
+        return None
+
+    return match.group(1).strip()
 
 
 def _is_table_separator(line: str) -> bool:
     text = line.strip()
-    return not text or bool(_PAGE_RE.search(text) or _FRAGMENT_RE.search(text))
+    return not text or bool(
+        _PAGE_RE.search(text)
+        or _FRAGMENT_RE.search(text)
+        or _TABLE_BOILERPLATE_RE.search(text)
+    )
 
 
 def _make_table_id(caption: str | None, table_number: int) -> str:
     source = caption or f"table-{table_number}"
     digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:10]
-    number = re.search(r"\d+(?:\.\d+)*", source)
-    if not number:
+    key = _table_key(source)
+    if not key:
         return f"table_{table_number}_{digest}"
-    return f"table_{number.group(0).replace('.', '_')}_{digest}"
+
+    return f"table_{key}_{digest}"
+
+
+def _table_key(source: str) -> str | None:
+    match = re.search(
+        r"Таблица\s+([А-ЯA-Z]\.?\d+(?:\.\d+)*|\d+(?:\.\d+)*)",
+        source,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    return re.sub(r"[^0-9a-zа-яё]+", "_", match.group(1).lower()).strip("_")
+
+
+def _span_attr(attrs: list[tuple[str, str | None]], name: str) -> int:
+    values = {key.lower(): value for key, value in attrs if key}
+    raw_value = values.get(name)
+    if not raw_value:
+        return 1
+
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return 1
 
 
 def _row_to_html(row: list[str]) -> str:

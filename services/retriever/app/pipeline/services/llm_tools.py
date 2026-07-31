@@ -1,35 +1,23 @@
-import re
-
 import structlog
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
 from app.pipeline.schemas import EvidenceItem, ExpandedChunk, QueryAspect
+from app.pipeline.services.context_packer import (
+    PackedContext,
+    build_packed_context,
+    estimate_text_tokens,
+)
+from app.pipeline.services.research import (
+    basis_block,
+    evidence_block,
+    plan_block,
+    source_group,
+)
+from app.pipeline.services.text_terms import term_covered, term_items, term_keys
 from app.schemas import LLMConfig, RetrievalResult
-from app.services.context_packer import PackedContext, build_packed_context
-from app.services.research import evidence_block, plan_block
 
 log = structlog.get_logger(__name__)
-_WORD_RE = re.compile(r"[а-яёa-z0-9][а-яёa-z0-9.\-]*", re.IGNORECASE)
-_COVERAGE_STOP_TERMS = {
-    "какие",
-    "какой",
-    "какая",
-    "какое",
-    "требования",
-    "требование",
-    "предъявляются",
-    "предъявлять",
-    "нужно",
-    "нужны",
-    "должен",
-    "должна",
-    "должно",
-    "должны",
-    "можно",
-    "норматив",
-    "нормы",
-}
 
 
 async def _call_llm(
@@ -99,7 +87,13 @@ async def compose_answer(
     _update_trace_metadata(trace_metadata, packed)
     _log_packed_context(packed)
 
-    answer = await _call_answer_llm(client, system_prompt, static_prompt, packed)
+    answer = await _call_answer_llm(
+        client,
+        system_prompt,
+        static_prompt,
+        packed,
+        trace_metadata,
+    )
 
     return answer or _fallback_answer(results)
 
@@ -130,6 +124,7 @@ def prepare_answer_context(
         static_prompt=prompt,
         system_prompt=system_prompt,
         expanded_relations=expanded_relations,
+        evidence_items=evidence_items,
     )
 
     return prompt, packed
@@ -155,16 +150,20 @@ def _build_static_prompt(
     coverage_note = _query_coverage_note(query, results)
     plan = plan_block(query_plan)
     evidence = evidence_block(evidence_items, answer_mode)
+    basis = basis_block(evidence_items)
     mode_rules = _mode_rules(answer_mode)
+    format_rules = _answer_format_rules(answer_mode)
 
     return (
         f"Исходный запрос пользователя:\n{query}\n\n"
         f"Поисковый запрос после переформулирования:\n{effective_query}\n\n"
         f"План поиска:\n{plan}\n\n"
-        f"Извлеченные evidence:\n{evidence}\n\n"
+        f"Структурированные evidence:\n{evidence}\n\n"
+        f"Уникальные основания:\n{basis}\n\n"
         f"Режим ответа:\n{mode_rules}\n\n"
         f"Проверка покрытия исходного вопроса:\n{coverage_note}\n\n"
-        f"Правила использования найденного контекста:\n{usage_rules}"
+        f"Правила использования найденного контекста:\n{usage_rules}\n\n"
+        f"Требуемый формат ответа:\n{format_rules}"
     )
 
 
@@ -181,6 +180,10 @@ def _update_trace_metadata(
         "used_tokens": packed.used_tokens,
         "budget_tokens": packed.budget_tokens,
         "max_output_tokens": packed.max_output_tokens,
+        "input_tokens": packed.input_tokens,
+        "model_max_len": packed.model_max_tokens,
+        "dropped_by_budget": packed.dropped_by_budget,
+        "dropped_by_relevance": packed.dropped_by_relevance,
     }
 
 
@@ -200,16 +203,95 @@ async def _call_answer_llm(
     system_prompt: str,
     static_prompt: str,
     packed: PackedContext,
+    trace_metadata: dict | None,
 ) -> str | None:
-    user_prompt = f"{static_prompt}\n\nКонтекст из ретривера:\n{packed.text}"
+    user_prompt, max_tokens, input_tokens = _fit_answer_prompt(
+        system_prompt,
+        static_prompt,
+        packed.text,
+        packed.max_output_tokens,
+    )
+    _update_preflight_stats(trace_metadata, input_tokens, max_tokens)
+    log.info(
+        "llm_prompt_preflight",
+        input_tokens=input_tokens,
+        max_output_tokens=max_tokens,
+        model_max_len=LLMConfig.ANSWER_MODEL_MAX_LEN,
+    )
+
     return await _call_llm(
         client,
         LLMConfig.ANSWER_MODEL,
         system_prompt,
         user_prompt,
         temperature=0.15,
-        max_tokens=packed.max_output_tokens,
+        max_tokens=max_tokens,
     )
+
+
+def _update_preflight_stats(
+    trace_metadata: dict | None,
+    input_tokens: int,
+    max_tokens: int,
+) -> None:
+    if trace_metadata is None:
+        return
+
+    packing = trace_metadata.setdefault("context_packing", {})
+    packing["input_tokens"] = input_tokens
+    packing["max_output_tokens"] = max_tokens
+    packing["model_max_len"] = LLMConfig.ANSWER_MODEL_MAX_LEN
+
+
+def _fit_answer_prompt(
+    system_prompt: str,
+    static_prompt: str,
+    context_text: str,
+    max_output_tokens: int,
+) -> tuple[str, int, int]:
+    max_tokens = max_output_tokens
+    context = context_text
+    user_prompt = _answer_user_prompt(static_prompt, context)
+    input_tokens = _prompt_tokens(system_prompt, user_prompt)
+
+    while _over_model_limit(input_tokens, max_tokens) and context:
+        context = _shrink_context_text(context)
+        user_prompt = _answer_user_prompt(static_prompt, context)
+        input_tokens = _prompt_tokens(system_prompt, user_prompt)
+
+    if _over_model_limit(input_tokens, max_tokens):
+        max_tokens = _safe_output_tokens(input_tokens)
+
+    return user_prompt, max_tokens, input_tokens
+
+
+def _answer_user_prompt(static_prompt: str, context_text: str) -> str:
+    return f"{static_prompt}\n\nКонтекст из ретривера:\n{context_text}"
+
+
+def _prompt_tokens(system_prompt: str, user_prompt: str) -> int:
+    return estimate_text_tokens(f"{system_prompt}\n{user_prompt}")
+
+
+def _over_model_limit(input_tokens: int, output_tokens: int) -> bool:
+    total = input_tokens + output_tokens + LLMConfig.ANSWER_TOKEN_SAFETY_MARGIN
+
+    return total > LLMConfig.ANSWER_MODEL_MAX_LEN
+
+
+def _shrink_context_text(context_text: str) -> str:
+    if len(context_text) <= 800:
+        return ""
+
+    max_chars = max(800, int(len(context_text) * 0.8))
+    return context_text[:max_chars].rsplit("\n---\n", 1)[0].strip()
+
+
+def _safe_output_tokens(input_tokens: int) -> int:
+    available = LLMConfig.ANSWER_MODEL_MAX_LEN - input_tokens
+    available -= LLMConfig.ANSWER_TOKEN_SAFETY_MARGIN
+
+    return max(1, min(LLMConfig.ANSWER_MAX_TOKENS, available))
 
 
 def _build_context(results: list[RetrievalResult]) -> str:
@@ -227,11 +309,15 @@ def _context_usage_rules(results: list[RetrievalResult]) -> str:
     rules = [
         "- Сначала проверь, подтверждают ли найденные фрагменты полный исходный вопрос, а не только отдельные слова или условия.",
         "- Не выдавай смежный нормативный смысл за прямой ответ на исходный вопрос.",
-        "- Если есть только частичные или смежные данные, дай сводку найденного и явно напиши, что прямой ответ не подтвержден.",
-        "- Фрагменты, подтянутые по внутренней ссылке, являются обязательным контекстом.",
+        "- Основные результаты поиска имеют приоритет перед фрагментами, подтянутыми по внутренним ссылкам.",
+        "- Фрагменты из ссылок и таблиц используй как уточняющий контекст, если они подтверждают или ограничивают primary evidence.",
+        "- Если найдено несколько условий применения, не своди их к одному универсальному числу или одному правилу.",
+        "- Если есть только частичные или смежные данные, дай инженерную сводку найденного и явно напиши, чего не хватает.",
         "- Если текст ссылается на таблицу и таблица есть в контексте, извлеки из нее конкретные значения.",
         "- Не отвечай только фразой, что значения указаны в таблице, если строки таблицы переданы ниже.",
         "- Если нужную строку или колонку нельзя однозначно восстановить, прямо укажи это ограничение.",
+        "- Контекст уже очищен до уникальных нормативных единиц; не превращай соседние окна одного пункта или таблицы в разные основания.",
+        "- Раздел 'Основание' формируй только по блоку 'Уникальные основания' и не дублируй одинаковый source_group.",
     ]
 
     if any(result.is_table for result in results):
@@ -255,21 +341,81 @@ def _mode_rules(answer_mode: str) -> str:
         )
     if answer_mode == "multi_path":
         return (
-            "Собери возможные пути решения по условиям применимости, затем дай "
-            "итоговую инженерную сводку."
+            "Дай инженерную сводку по нескольким условиям применимости. "
+            "Сначала сформулируй общий вывод, затем перечисли нормативные пути. "
+            "Не объединяй разные условия в одно правило; отделяй отсутствие "
+            "универсального значения от найденных применимых норм."
         )
 
-    return "Дай прямой ответ с условиями применения и нормативным основанием."
+    return (
+        "Дай прямой ответ, но сохрани условия применимости, ограничения и "
+        "дополнительные найденные нормы, если они есть в context."
+    )
+
+
+def _answer_format_rules(answer_mode: str) -> str:
+    if answer_mode == "direct_supported":
+        return _direct_format()
+    if answer_mode == "not_found":
+        return _not_found_format()
+
+    return _summary_format()
+
+
+def _summary_format() -> str:
+    return (
+        "Форматируй ответ в Markdown. Используй разделы:\n"
+        "#### Краткая инженерная сводка\n"
+        "1-3 предложения: есть ли одно универсальное правило или набор условий.\n"
+        "#### По условиям применения\n"
+        "Список вариантов: условие -> требование/значение -> ссылка на фрагмент.\n"
+        "#### Что говорят нормы\n"
+        "Короткая группировка по документам и пунктам.\n"
+        "#### Ограничения / что уточнить\n"
+        "Только реальные ограничения из evidence и context.\n"
+        "#### Основание\n"
+        "Таблица: Документ | Раздел | Что подтверждает."
+    )
+
+
+def _direct_format() -> str:
+    return (
+        "Форматируй ответ в Markdown. Используй разделы:\n"
+        "#### Краткая инженерная сводка\n"
+        "Дай общий вывод в 1-2 предложениях.\n"
+        "#### По условиям применения\n"
+        "Укажи условия, при которых действует найденное правило.\n"
+        "#### Что говорят нормы\n"
+        "Коротко сгруппируй прямые и смежные нормы по документам и пунктам.\n"
+        "#### Ограничения / что уточнить\n"
+        "Укажи только реальные ограничения из evidence и context.\n"
+        "#### Основание\n"
+        "Таблица: Документ | Раздел | Что подтверждает."
+    )
+
+
+def _not_found_format() -> str:
+    return (
+        "Форматируй ответ в Markdown. Используй разделы:\n"
+        "#### Краткая инженерная сводка\n"
+        "Напиши, что прямой ответ не подтвержден найденными нормами.\n"
+        "#### Что удалось найти\n"
+        "Перечисли только полезные смежные фрагменты.\n"
+        "#### Что уточнить\n"
+        "Укажи, какие исходные данные или документы нужны.\n"
+        "#### Основание\n"
+        "Таблица: Документ | Раздел | Что подтверждает."
+    )
 
 
 def _query_coverage_note(query: str, results: list[RetrievalResult]) -> str:
-    terms = _coverage_terms(query)
+    terms = term_items(query)
     if not terms:
         return "Ключевые термины исходного вопроса не выделены."
 
     context_keys = _context_term_keys(results)
     missing = [
-        term for term in terms if not _is_term_covered(_term_key(term), context_keys)
+        term.raw for term in terms if not term_covered(term.key, context_keys)
     ]
 
     if not missing:
@@ -283,23 +429,9 @@ def _query_coverage_note(query: str, results: list[RetrievalResult]) -> str:
     )
 
 
-def _coverage_terms(text: str) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-
-    for raw in _WORD_RE.findall(text.lower()):
-        term = raw.strip(".-")
-        key = _term_key(term)
-        if _is_coverage_term(term, key) and key not in seen:
-            terms.append(term)
-            seen.add(key)
-
-    return terms
-
-
 def _context_term_keys(results: list[RetrievalResult]) -> set[str]:
     context = " ".join(_result_search_text(result) for result in results).lower()
-    return {_term_key(raw.strip(".-")) for raw in _WORD_RE.findall(context)}
+    return term_keys(context)
 
 
 def _result_search_text(result: RetrievalResult) -> str:
@@ -314,84 +446,17 @@ def _result_search_text(result: RetrievalResult) -> str:
     )
 
 
-def _is_coverage_term(term: str, key: str) -> bool:
-    if not key or term in _COVERAGE_STOP_TERMS:
-        return False
-
-    return any(ch.isdigit() for ch in term) or len(key) >= 4
-
-
-def _is_term_covered(key: str, context_keys: set[str]) -> bool:
-    if key in context_keys:
-        return True
-
-    if len(key) < 5:
-        return False
-
-    prefix = key[:5]
-    return any(context_key.startswith(prefix) for context_key in context_keys)
-
-
-def _term_key(term: str) -> str:
-    if any(ch.isdigit() for ch in term):
-        return term
-
-    for suffix in _TERM_SUFFIXES:
-        if len(term) > len(suffix) + 3 and term.endswith(suffix):
-            return term[: -len(suffix)]
-
-    return term
-
-
-_TERM_SUFFIXES = (
-    "овать",
-    "ировать",
-    "аться",
-    "яться",
-    "ыми",
-    "ими",
-    "ого",
-    "ему",
-    "ами",
-    "ями",
-    "иях",
-    "ых",
-    "их",
-    "ом",
-    "ем",
-    "ой",
-    "ый",
-    "ий",
-    "ая",
-    "ое",
-    "ые",
-    "ие",
-    "ов",
-    "ев",
-    "ей",
-    "ам",
-    "ям",
-    "ах",
-    "ях",
-    "ать",
-    "ять",
-    "ить",
-    "еть",
-    "а",
-    "я",
-    "ы",
-    "и",
-    "е",
-    "у",
-    "ю",
-)
-
-
 def _fallback_answer(results: list[RetrievalResult]) -> str:
     bullets: list[str] = []
     basis: list[str] = []
+    seen_groups: set[str] = set()
 
-    for result in results[:3]:
+    for result in results:
+        group = source_group(result)
+        if group in seen_groups:
+            continue
+
+        seen_groups.add(group)
         snippet = " ".join(result.text.strip().split())[:280]
         if snippet:
             bullets.append(f"- {snippet}...")
@@ -401,6 +466,8 @@ def _fallback_answer(results: list[RetrievalResult]) -> str:
             label += f", раздел {result.section_path}"
 
         basis.append(f"- {label}")
+        if len(bullets) >= 3:
+            break
 
     answer_parts = [
         "## Ответ:\n",

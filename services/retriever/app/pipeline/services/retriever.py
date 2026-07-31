@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -15,10 +16,17 @@ from qdrant_client.models import (
     MatchText,
     MatchValue,
     Prefetch,
+    Range,
     SparseVector,
 )
 
 from app.pipeline.schemas import ExpandedChunk
+from app.pipeline.services.research import asks_norm_refs, is_norm_refs
+from app.pipeline.services.text_terms import (
+    expansion_terms,
+    query_terms,
+    term_coverage,
+)
 from app.schemas import RetrievalResult
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -30,6 +38,31 @@ REFERENCE_EXPANSION_LIMIT = 64
 REFERENCE_SCROLL_BATCH = 32
 REFERENCE_EXPANSION_TOP_RESULTS = 5
 REFERENCE_EXPANSION_MAX_DEPTH = 2
+TABLE_FULL_EXPANSION_MAX_WINDOWS = 24
+TABLE_NEIGHBOR_WINDOW_RADIUS = 2
+SECTION_NEIGHBOR_RADIUS = 2
+_TABLE_REF_RE = re.compile(
+    r"\b(?:таблиц[аеиыу]?|табл\.)\s*(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
+_SECTION_REF_RE = re.compile(
+    r"\b(?:пункт[аеуы]?|п\.|подраздел[аеуы]?|раздел[аеуы]?)\s*"
+    r"(\d+(?:\.\d+){1,3})",
+    re.IGNORECASE,
+)
+_APPENDIX_REF_RE = re.compile(
+    r"\bприложени[еяию]\s+([А-ЯA-Z])",
+    re.IGNORECASE,
+)
+_EXPAND_MARKERS = (
+    "таблиц",
+    "табл.",
+    "формул",
+    "коэффициент",
+    "$$",
+    "пункт",
+    "подраздел",
+)
 
 
 @lru_cache(maxsize=1)
@@ -88,6 +121,30 @@ def _table_id_filter(filename: str, table_id: str) -> Filter:
     )
 
 
+def _table_window_filter(
+    filename: str,
+    table_id: str,
+    start: int,
+    end: int,
+) -> Filter:
+    return Filter(
+        must=[
+            FieldCondition(key="filename", match=MatchText(text=filename)),
+            FieldCondition(key="table_id", match=MatchValue(value=table_id)),
+            FieldCondition(key="table_window_index", range=Range(gte=start, lte=end)),
+        ]
+    )
+
+
+def _chunk_window_filter(filename: str, start: int, end: int) -> Filter:
+    return Filter(
+        must=[
+            FieldCondition(key="filename", match=MatchText(text=filename)),
+            FieldCondition(key="chunk_index", range=Range(gte=start, lte=end)),
+        ]
+    )
+
+
 def _result_sort_key(result: RetrievalResult) -> tuple[int, int, int]:
     return (
         result.chunk_index if result.chunk_index is not None else 10**9,
@@ -104,6 +161,149 @@ def _hit_score(hit) -> float:
 
 def _table_relation(table_id: str) -> str:
     return f"table_id:{table_id}"
+
+
+def _is_large_table_hit(result: RetrievalResult) -> bool:
+    total = result.table_window_total or 0
+    return bool(total > TABLE_FULL_EXPANSION_MAX_WINDOWS and result.table_window_index)
+
+
+def _nearby_table_filter(result: RetrievalResult) -> Filter:
+    index = result.table_window_index or 1
+    start = max(1, index - TABLE_NEIGHBOR_WINDOW_RADIUS)
+    end = index + TABLE_NEIGHBOR_WINDOW_RADIUS
+
+    return _table_window_filter(result.filename, result.table_id or "", start, end)
+
+
+def _allow_expanded_chunk(
+    source: RetrievalResult,
+    chunk: RetrievalResult,
+    relation: str,
+    query: str,
+) -> bool:
+    if _is_heading_only(chunk):
+        return False
+
+    if is_norm_refs(chunk) and not asks_norm_refs(query):
+        return False
+
+    if relation.startswith(("table:", "table_id:")):
+        return _allow_table_ref(source, chunk, query)
+
+    if relation.startswith("neighbor:"):
+        return _allow_neighbor(source, chunk, query)
+
+    if relation.startswith("section:"):
+        return _term_coverage(source, chunk) >= 0.15
+
+    return True
+
+
+def _allow_table_ref(
+    source: RetrievalResult,
+    chunk: RetrievalResult,
+    query: str,
+) -> bool:
+    terms = query_terms(query)
+    if not terms:
+        return _term_coverage(source, chunk) >= 0.15
+
+    query_match = term_coverage(terms, _searchable_text(chunk)) >= 0.5
+    source_match = _term_coverage(source, chunk) >= 0.2
+
+    return query_match or source_match
+
+
+def _allow_neighbor(
+    source: RetrievalResult,
+    chunk: RetrievalResult,
+    query: str,
+) -> bool:
+    if not _same_section_area(source, chunk):
+        return False
+    if _term_coverage(source, chunk) >= 0.1:
+        return True
+
+    terms = query_terms(query)
+    return bool(terms and term_coverage(terms, _searchable_text(chunk)) >= 0.35)
+
+
+def _same_section_area(source: RetrievalResult, chunk: RetrievalResult) -> bool:
+    if not source.section_path or not chunk.section_path:
+        return True
+
+    return source.section_path == chunk.section_path
+
+
+def _allow_table_siblings(result: RetrievalResult, query: str) -> bool:
+    terms = query_terms(query)
+    if not terms:
+        return True
+
+    return term_coverage(terms, _searchable_text(result)) >= 0.5
+
+
+def _is_heading_only(result: RetrievalResult) -> bool:
+    text = result.text.strip()
+    if result.is_table:
+        return False
+
+    words = text.split()
+    anchors = [ref for ref in result.anchor_refs if str(ref).startswith("section:")]
+
+    return len(words) <= 12 and bool(anchors or result.section_path)
+
+
+def _term_coverage(source: RetrievalResult, chunk: RetrievalResult) -> float:
+    terms = expansion_terms(_searchable_text(source))
+    return term_coverage(terms, _searchable_text(chunk))
+
+
+def _searchable_text(result: RetrievalResult) -> str:
+    return " ".join(
+        [
+            result.text,
+            result.filename,
+            result.section_path,
+            result.parent_heading or "",
+            result.leaf_heading or "",
+            result.table_caption or "",
+        ]
+    )
+
+
+def _semantic_refs(result: RetrievalResult) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    for ref in [*result.cross_refs, *_parsed_refs(result.text)]:
+        if ref in seen:
+            continue
+
+        refs.append(ref)
+        seen.add(ref)
+
+    return refs
+
+
+def _parsed_refs(text: str) -> list[str]:
+    refs: list[str] = []
+    refs.extend(f"table:{match.group(1)}" for match in _TABLE_REF_RE.finditer(text))
+    refs.extend(f"section:{match.group(1)}" for match in _SECTION_REF_RE.finditer(text))
+    refs.extend(
+        f"appendix:{match.group(1).upper()}" for match in _APPENDIX_REF_RE.finditer(text)
+    )
+
+    return refs
+
+
+def _needs_neighbor_expansion(result: RetrievalResult) -> bool:
+    if result.is_table:
+        return False
+
+    text = _searchable_text(result).lower()
+    return bool(_semantic_refs(result)) or any(marker in text for marker in _EXPAND_MARKERS)
 
 
 def _encode_query(
@@ -230,7 +430,7 @@ class QdrantRetriever:
         retrieved = self._search(query, top_k, prefetch_k, mode, qdrant_filter)
 
         if expand_refs and ref_depth > 0:
-            return retrieved, self._expand_by_refs(retrieved, ref_depth)
+            return retrieved, self._expand_by_refs(retrieved, ref_depth, query)
 
         return retrieved, []
 
@@ -335,6 +535,7 @@ class QdrantRetriever:
         self,
         results: list[RetrievalResult],
         ref_depth: int,
+        query: str,
     ) -> list[ExpandedChunk]:
         expanded: list[ExpandedChunk] = []
         seen_ids = {result.id for result in results}
@@ -345,45 +546,71 @@ class QdrantRetriever:
                 continue
 
             context = _ExpansionContext(result, depth=1, path=[result.id])
-            expanded.extend(self._table_sibling_results(context, seen_ids))
+            expanded.extend(self._table_sibling_results(context, seen_ids, query))
+            expanded.extend(
+                self._expanded_neighbors(
+                    context,
+                    seen_ids,
+                    remaining_depth=remaining_depth,
+                    query=query,
+                )
+            )
             expanded.extend(
                 self._expand_result_refs(
                     context,
                     seen_ids,
                     remaining_depth=remaining_depth,
+                    query=query,
                 )
             )
 
         return expanded
+
+    def _expanded_neighbors(
+        self,
+        context: _ExpansionContext,
+        seen_ids: set[str],
+        remaining_depth: int,
+        query: str,
+    ) -> list[ExpandedChunk]:
+        neighbors = self._neighbor_results(context, seen_ids, query)
+        if remaining_depth <= 1:
+            return neighbors
+
+        return self._with_nested_refs(neighbors, seen_ids, remaining_depth - 1, query)
 
     def _expand_result_refs(
         self,
         context: _ExpansionContext,
         seen_ids: set[str],
         remaining_depth: int,
+        query: str,
     ) -> list[ExpandedChunk]:
         if remaining_depth <= 0:
             return []
 
-        direct = self._related_results(context, seen_ids)
+        direct = self._related_results(context, seen_ids, query)
 
         if remaining_depth == 1:
             return direct
 
-        return self._with_nested_refs(direct, seen_ids, remaining_depth - 1)
+        return self._with_nested_refs(direct, seen_ids, remaining_depth - 1, query)
 
     def _with_nested_refs(
         self,
         expanded_chunks: list[ExpandedChunk],
         seen_ids: set[str],
         remaining_depth: int,
+        query: str,
     ) -> list[ExpandedChunk]:
         expanded: list[ExpandedChunk] = []
 
         for item in expanded_chunks:
             expanded.append(item)
             context = _ExpansionContext(item.chunk, item.depth + 1, item.path)
-            expanded.extend(self._expand_result_refs(context, seen_ids, remaining_depth))
+            expanded.extend(
+                self._expand_result_refs(context, seen_ids, remaining_depth, query)
+            )
 
         return expanded
 
@@ -391,11 +618,35 @@ class QdrantRetriever:
         self,
         context: _ExpansionContext,
         seen_ids: set[str],
+        query: str,
     ) -> list[ExpandedChunk]:
         related: list[ExpandedChunk] = []
 
-        for ref in context.source.cross_refs:
-            related.extend(self._scroll_ref_results(context, ref, seen_ids))
+        for ref in _semantic_refs(context.source):
+            related.extend(self._scroll_ref_results(context, ref, seen_ids, query))
+
+        return sorted(related, key=lambda item: _result_sort_key(item.chunk))
+
+    def _neighbor_results(
+        self,
+        context: _ExpansionContext,
+        seen_ids: set[str],
+        query: str,
+    ) -> list[ExpandedChunk]:
+        result = context.source
+        if not _needs_neighbor_expansion(result) or result.chunk_index is None:
+            return []
+
+        start = max(0, result.chunk_index - SECTION_NEIGHBOR_RADIUS)
+        end = result.chunk_index + SECTION_NEIGHBOR_RADIUS
+        records = self._scroll_filter_records(
+            _chunk_window_filter(result.filename, start, end),
+            REFERENCE_EXPANSION_LIMIT,
+        )
+
+        related = self._records_to_expanded_chunks(
+            records, "neighbor:section", seen_ids, context, query
+        )
 
         return sorted(related, key=lambda item: _result_sort_key(item.chunk))
 
@@ -403,13 +654,21 @@ class QdrantRetriever:
         self,
         context: _ExpansionContext,
         seen_ids: set[str],
+        query: str,
     ) -> list[ExpandedChunk]:
         result = context.source
         if not result.is_table or not result.table_id:
             return []
 
+        if not _allow_table_siblings(result, query):
+            return []
+
+        scroll_filter = _table_id_filter(result.filename, result.table_id)
+        if _is_large_table_hit(result):
+            scroll_filter = _nearby_table_filter(result)
+
         records = self._scroll_filter_records(
-            _table_id_filter(result.filename, result.table_id),
+            scroll_filter,
             REFERENCE_EXPANSION_LIMIT,
         )
         related = self._records_to_expanded_chunks(
@@ -417,6 +676,7 @@ class QdrantRetriever:
             _table_relation(result.table_id),
             seen_ids,
             context,
+            query,
         )
 
         return sorted(related, key=lambda item: _result_sort_key(item.chunk))
@@ -426,13 +686,14 @@ class QdrantRetriever:
         context: _ExpansionContext,
         ref: str,
         seen_ids: set[str],
+        query: str,
     ) -> list[ExpandedChunk]:
         records = self._scroll_filter_records(
             _anchor_filter(context.source.filename, ref),
             REFERENCE_EXPANSION_LIMIT,
         )
 
-        return self._records_to_expanded_chunks(records, ref, seen_ids, context)
+        return self._records_to_expanded_chunks(records, ref, seen_ids, context, query)
 
     def _scroll_filter_records(
         self,
@@ -464,6 +725,7 @@ class QdrantRetriever:
         relation: str,
         seen_ids: set[str],
         context: _ExpansionContext,
+        query: str,
     ) -> list[ExpandedChunk]:
         results: list[ExpandedChunk] = []
 
@@ -472,18 +734,33 @@ class QdrantRetriever:
             if record_id in seen_ids:
                 continue
 
+            item = self._expanded_record(record, relation, context, query)
+            if item is None:
+                continue
+
             seen_ids.add(record_id)
-            results.append(
-                ExpandedChunk(
-                    chunk=self._hit_to_result(record),
-                    expanded_from_chunk_id=context.source.id,
-                    relation=relation,
-                    depth=context.depth,
-                    path=[*context.path, record_id],
-                )
-            )
+            results.append(item)
 
         return results
+
+    def _expanded_record(
+        self,
+        record,
+        relation: str,
+        context: _ExpansionContext,
+        query: str,
+    ) -> ExpandedChunk | None:
+        chunk = self._hit_to_result(record)
+        if not _allow_expanded_chunk(context.source, chunk, relation, query):
+            return None
+
+        return ExpandedChunk(
+            chunk=chunk,
+            expanded_from_chunk_id=context.source.id,
+            relation=relation,
+            depth=context.depth,
+            path=[*context.path, chunk.id],
+        )
 
     def _search_hybrid_rerank(
         self,

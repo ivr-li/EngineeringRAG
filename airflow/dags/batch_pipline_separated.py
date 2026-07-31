@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from collections import defaultdict
 from functools import lru_cache
@@ -24,6 +25,7 @@ QDRANT_VECTOR_SIZE = 1024
 QDRANT_ENCODE_BATCH = 16
 QDRANT_UPSERT_BATCH = 32
 QDRANT_COLBERT_SIZE = 1024
+TABLE_ID_RE = re.compile(r"\bTABLE_ID\s*=\s*(?P<table_id>[a-z0-9_\-]+)", re.IGNORECASE)
 
 
 # ============================================================
@@ -92,6 +94,42 @@ def read_s3_text(
 def batch_list(items: list, batch_size: int = BATCH_SIZE) -> list[list]:
     """Split a flat list into fixed-size chunks"""
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def chunk_text(chunk: dict) -> str:
+    return "\n".join(str(chunk.get(key) or "") for key in ("text", "raw_text"))
+
+
+def table_text_ids(chunks: list[dict]) -> set[str]:
+    ids: set[str] = set()
+    for chunk in chunks:
+        matches = TABLE_ID_RE.finditer(chunk_text(chunk))
+        ids.update(match.group("table_id") for match in matches)
+
+    return ids
+
+
+def table_payload_ids(chunks: list[dict]) -> set[str]:
+    return {chunk["table_id"] for chunk in chunks if chunk.get("table_id")}
+
+
+def validate_table_payload(
+    source_table_ids: set[str],
+    enriched_chunks: list[dict],
+    file_name: str,
+) -> None:
+    payload_ids = table_payload_ids(enriched_chunks)
+    missing_ids = sorted(source_table_ids - payload_ids)
+    logging.info(
+        f">>> Table metadata quality: file={file_name}, "
+        f"annotated_input={len(source_table_ids)}, payload_output={len(payload_ids)}"
+    )
+
+    if missing_ids:
+        raise ValueError(
+            f"Table metadata was lost for {file_name}: "
+            f"missing table_ids={missing_ids}"
+        )
 
 
 @lru_cache(maxsize=1)
@@ -505,7 +543,7 @@ def build_batch_pipeline(dag_id: str, mode: str):
 
                     for tc in table_chunks:
                         tc["is_table"] = True
-                        # Префикс помогает модели понять контекст при энкодинге
+                        # The prefix preserves table context during embedding.
                         tc["text"] = f"[ТАБЛИЦА] {tc.get('text', '')}"
 
                     logging.info(
@@ -513,7 +551,12 @@ def build_batch_pipeline(dag_id: str, mode: str):
                         f"file={file_name}, task_id={task_id}"
                     )
                     try:
-                        all_enriched = process_chunks(text_chunks + table_chunks)
+                        source_chunks = text_chunks + table_chunks
+                        source_table_ids = table_text_ids(source_chunks)
+                        all_enriched = process_chunks(source_chunks)
+                        validate_table_payload(
+                            source_table_ids, all_enriched, file_name
+                        )
                         source_md = read_s3_text(
                             hook_minio,
                             f"{DEV_DATA_MINERU_MD}/{Path(file_name).name}",
@@ -631,7 +674,14 @@ def build_batch_pipeline(dag_id: str, mode: str):
 
             import torch
             from qdrant_client import QdrantClient
-            from qdrant_client.models import PointStruct, SparseVector
+            from qdrant_client.models import (
+                FieldCondition,
+                Filter,
+                FilterSelector,
+                MatchValue,
+                PointStruct,
+                SparseVector,
+            )
 
             # Диагностика GPU
             providers = (
@@ -661,6 +711,21 @@ def build_batch_pipeline(dag_id: str, mode: str):
                     logging.warning(f">>> Empty chunk list in {json_path}, skip")
                     continue
 
+                filename = chunks[0].get("filename") or path.stem
+                client.delete(
+                    collection_name=QDRANT_COLLECTION,
+                    points_selector=FilterSelector(
+                        filter=Filter(
+                            must=[
+                                FieldCondition(
+                                    key="filename",
+                                    match=MatchValue(value=filename),
+                                )
+                            ]
+                        )
+                    ),
+                    wait=True,
+                )
                 logging.info(f">>> Processing {len(chunks)} chunks from {path.name}")
 
                 # -----Iterate in QDRANT_ENCODE_BATCH sized windows -----
@@ -698,7 +763,7 @@ def build_batch_pipeline(dag_id: str, mode: str):
 
                     # ----- 3) Build PointStruct list -----
                     points: list[PointStruct] = []
-                    for i, chunk in enumerate(enc_batch):
+                    for i, chunk in enumerate(valid_chunks):
                         # Deterministic UUID from filename + chunk_index so re-runs
                         # overwrite the same point instead of creating duplicates.
                         point_id = str(
@@ -764,10 +829,11 @@ def build_batch_pipeline(dag_id: str, mode: str):
                         total_upserted += len(sub)
                         logging.info(
                             f">>> Upserted {len(sub)} points(file={path.name},"
-                            "enc_offset={enc_start},"
-                            "ups_offset={ups_start})"
+                            f"enc_offset={enc_start},"
+                            f"ups_offset={ups_start})"
                         )
                     del dense_vecs, lexical_vecs, colbert_vecs, points, enc_batch
+                    del valid_chunks
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()

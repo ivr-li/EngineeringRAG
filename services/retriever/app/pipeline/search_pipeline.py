@@ -11,10 +11,19 @@ from app.pipeline.schemas import (
     PipelineResult,
     QueryAspect,
 )
+from app.pipeline.services import QdrantRetriever, prepare_answer_context
+from app.pipeline.services.canonical import canonicalize_results
+from app.pipeline.services.context_packer import PackedContext
+from app.pipeline.services.research import (
+    answer_mode_reason,
+    build_evidence,
+    build_evidence_groups,
+    build_follow_up_plan,
+    build_q_plan,
+    coverage_gaps,
+    pick_ans_mode,
+)
 from app.schemas import SearchRequest
-from app.services import QdrantRetriever, prepare_answer_context
-from app.services.context_packer import PackedContext
-from app.services.research import build_evidence, build_q_plan, pick_ans_mode
 
 Rewriter = Callable[[OpenAI, str, str], Awaitable[tuple[str, bool]]]
 Composer = Callable[..., Awaitable[str]]
@@ -98,23 +107,29 @@ class SearchPipeline:
         result.was_rewritten = was_rewritten
 
     async def _retrieve(self, request: SearchRequest, result: PipelineResult) -> None:
-        result.query_plan = build_q_plan(request.query, result.effective_question)
+        plan = build_q_plan(request.query, result.effective_question)
 
         with result.timings.measure("retrieval_latency_ms"):
-            retrieved, expanded = await self._retrieve_plan(
-                request,
-                result.query_plan,
+            retrieved, expanded, result.query_plan = await self._retrieve_plan(
+                request, plan, result.effective_question
             )
 
         result.retrieved = retrieved
         result.expanded = expanded
-        result.results = self.retriever.merge_stages(retrieved, expanded)
+        canonicalized = canonicalize_results(
+            self.retriever.merge_stages(retrieved, expanded),
+            expanded,
+            request.query,
+        )
+        result.results = canonicalized.results
+        result.canonical_groups = canonicalized.groups
 
     async def _retrieve_plan(
         self,
         request: SearchRequest,
         plan: list[QueryAspect],
-    ) -> tuple[list, list]:
+        effective_query: str,
+    ) -> tuple[list, list, list[QueryAspect]]:
         retrieved: list = []
         expanded: list = []
         seen: set[str] = set()
@@ -124,7 +139,26 @@ class SearchPipeline:
             _add_results(retrieved, batch, seen)
             _add_expanded(expanded, refs, seen)
 
-        return retrieved, expanded
+        merged = self.retriever.merge_stages(retrieved, expanded)
+        canonicalized = canonicalize_results(merged, expanded, request.query)
+        base_evidence = build_evidence(
+            canonicalized.results,
+            request.query,
+            expanded,
+        )
+        follow_ups = build_follow_up_plan(
+            request.query,
+            effective_query,
+            canonicalized.results,
+            plan,
+            base_evidence,
+        )
+        for aspect in follow_ups:
+            batch, refs = await self._retrieve_one(request, aspect.query)
+            _add_results(retrieved, batch, seen)
+            _add_expanded(expanded, refs, seen)
+
+        return retrieved, expanded, plan + follow_ups
 
     async def _retrieve_one(
         self,
@@ -152,9 +186,38 @@ class SearchPipeline:
         if not result.results:
             return
 
-        result.evidence_items = build_evidence(result.results, request.query)
+        self._build_answer_metadata(request, result)
+        static_prompt, packed = self._prepare_context(request, result)
+        _apply_packed_context(result, packed)
+
+        if request.compose_system_prompt:
+            await self._generate(request, result, packed, static_prompt)
+
+    def _build_answer_metadata(
+        self,
+        request: SearchRequest,
+        result: PipelineResult,
+    ) -> None:
+        result.evidence_items = build_evidence(
+            result.results,
+            request.query,
+            result.expanded,
+        )
         result.answer_mode = pick_ans_mode(result.evidence_items, request.query)
-        static_prompt, packed = prepare_answer_context(
+        result.answer_mode_reason = answer_mode_reason(
+            result.evidence_items,
+            request.query,
+            result.answer_mode,
+        )
+        result.coverage_gaps = coverage_gaps(result.evidence_items, request.query)
+        result.evidence_groups = build_evidence_groups(result.evidence_items)
+
+    def _prepare_context(
+        self,
+        request: SearchRequest,
+        result: PipelineResult,
+    ) -> tuple[str, PackedContext]:
+        return prepare_answer_context(
             results=result.results,
             query=request.query,
             effective_query=result.effective_question,
@@ -164,10 +227,6 @@ class SearchPipeline:
             evidence_items=result.evidence_items,
             query_plan=result.query_plan,
         )
-        _apply_packed_context(result, packed)
-
-        if request.compose_system_prompt:
-            await self._generate(request, result, packed, static_prompt)
 
     async def _generate(
         self,
@@ -204,6 +263,15 @@ def _apply_packed_context(result: PipelineResult, packed: PackedContext) -> None
     ]
     result.context_excluded = selection_excluded + token_excluded
     result.context_text = packed.text
+    result.context_stats = {
+        "input_tokens": packed.input_tokens,
+        "max_output_tokens": packed.max_output_tokens,
+        "model_max_len": packed.model_max_tokens,
+        "budget_tokens": packed.budget_tokens,
+        "used_tokens": packed.used_tokens,
+        "dropped_by_budget": packed.dropped_by_budget,
+        "dropped_by_relevance": packed.dropped_by_relevance,
+    }
 
 
 def _add_results(target: list, batch: list, seen: set[str]) -> None:
