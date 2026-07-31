@@ -56,11 +56,11 @@ EngineeringRAG решает эту задачу как локальный инж
 <table>
   <tr>
     <td width="50%">
-      <strong>1. Вопрос в интерфейсе</strong><br>
+      <strong>1. Начальный экран</strong><br>
       <img src="docs/view1.png" alt="Вопрос в EngineeringRAG" width="100%">
     </td>
     <td width="50%">
-      <strong>2. Ответ с источниками</strong><br>
+      <strong>2. Экран ответа</strong><br>
       <img src="docs/view2.png" alt="Ответ с источниками в EngineeringRAG" width="100%">
     </td>
   </tr>
