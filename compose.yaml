@@ -93,7 +93,7 @@ services:
             context: .
             dockerfile: services/user_api/Dockerfile
         container_name: user_api
-        profiles: ["search"]
+        profiles: ["base"]
         restart: unless-stopped
         environment:
             USER_API_DATABASE_URL: >-
